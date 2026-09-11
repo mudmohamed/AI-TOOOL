@@ -2,6 +2,8 @@ import { DerivAccountInfo } from '../types';
 
 type MessageHandler = (data: any) => void;
 
+type AccountMode = 'DEMO' | 'REAL';
+
 export interface PlaceContractParams {
   clientTradeId: string;
   contract_type: string;
@@ -14,9 +16,10 @@ export interface PlaceContractParams {
 
 class DerivWebSocketService {
   private ws: WebSocket | null = null;
-  private appId = '1089';
-  private apiToken = '';
-  private readonly url = 'wss://ws.derivws.com/websockets/v3';
+  private accountWs: WebSocket | null = null;
+  private readonly publicUrl = 'wss://api.derivws.com/trading/v1/options/ws/public';
+  private readonly bridgeUrl = 'https://fasterpro-analyzer.vercel.app/matrix-bridge.html';
+  private readonly bridgeOrigin = 'https://fasterpro-analyzer.vercel.app';
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private messageHandlers = new Set<MessageHandler>();
@@ -25,9 +28,13 @@ class DerivWebSocketService {
   private lastPingTime = 0;
   private subscribedSymbols = new Set<string>();
   private proposalMeta = new Map<string, any>();
+  private privateReqId = 1000;
+  private proposalRequests = new Map<number, string>();
+  private buyRequests = new Map<number, string>();
+  private intentionalAccountClose = false;
   private accountInfo: DerivAccountInfo = {
     isAuthorized: false,
-    appId: '1089',
+    appId: 'oauth2',
   };
 
   private symbolPipSizes = new Map<string, number>([
@@ -50,104 +57,12 @@ class DerivWebSocketService {
   private symbolCurrentPrices = new Map<string, number>();
 
   constructor() {
-    this.parseOAuthCallback();
-
-    try {
-      const savedAppId = localStorage.getItem('deriv_app_id');
-      const savedToken = sessionStorage.getItem('deriv_api_token');
-      if (savedAppId) this.appId = savedAppId;
-      if (savedToken) this.apiToken = savedToken;
-    } catch {
-      // Storage can be unavailable in restricted browser contexts.
-    }
-
     this.connect();
   }
 
-  private getPassthrough(data: any): any {
-    return data?.echo_req?.passthrough || data?.passthrough || null;
-  }
-
-  public parseOAuthCallback(): boolean {
-    if (typeof window === 'undefined') return false;
-
-    try {
-      let queryString = '';
-      if (window.location.search?.includes('token')) {
-        queryString = window.location.search.replace(/^\?/, '');
-      } else if (window.location.hash?.includes('token')) {
-        queryString = window.location.hash.replace(/^#/, '');
-        if (queryString.includes('?')) queryString = queryString.split('?')[1];
-      }
-
-      if (!queryString) return false;
-
-      const params = new URLSearchParams(queryString);
-      const accountsList: Array<{
-        loginid: string;
-        currency: string;
-        is_virtual: boolean;
-        token?: string;
-      }> = [];
-      let primaryToken = '';
-      let index = 1;
-
-      while (params.has(`acct${index}`) && params.has(`token${index}`)) {
-        const loginid = params.get(`acct${index}`) || '';
-        const token = params.get(`token${index}`) || '';
-        const currency = params.get(`cur${index}`) || 'USD';
-        const is_virtual = loginid.startsWith('VRTC') || loginid.startsWith('VR');
-        if (token) {
-          accountsList.push({ loginid, currency, is_virtual, token });
-          if (!primaryToken) primaryToken = token;
-        }
-        index += 1;
-      }
-
-      if (accountsList.length === 0 && params.has('token')) {
-        const token = params.get('token') || '';
-        const loginid = params.get('acct') || '';
-        if (token) {
-          primaryToken = token;
-          accountsList.push({
-            loginid,
-            currency: params.get('cur') || 'USD',
-            is_virtual: loginid.startsWith('VRTC') || loginid.startsWith('VR'),
-            token,
-          });
-        }
-      }
-
-      if (!primaryToken) return false;
-
-      this.apiToken = primaryToken;
-      sessionStorage.setItem('deriv_api_token', primaryToken);
-      sessionStorage.setItem('deriv_accounts_list', JSON.stringify(accountsList));
-
-      const cleanUrl = `${window.location.pathname}${window.location.hash && !window.location.hash.includes('token') ? window.location.hash : ''}`;
-      window.history.replaceState({}, document.title, cleanUrl || '/');
-      return true;
-    } catch (error) {
-      console.warn('Unable to parse Deriv OAuth callback:', error);
-      return false;
-    }
-  }
-
-  public getOAuthRedirectUrl(customAppId?: string): string {
-    const id = customAppId?.trim() || this.appId;
-    return `https://oauth.deriv.com/oauth2/authorize?app_id=${encodeURIComponent(id)}&l=EN&brand=deriv`;
-  }
-
-  public switchAccount(loginId: string): void {
-    try {
-      const saved = sessionStorage.getItem('deriv_accounts_list');
-      if (!saved) return;
-      const list = JSON.parse(saved);
-      const match = Array.isArray(list) ? list.find((a: any) => a.loginid === loginId) : null;
-      if (match?.token) this.authorize(match.token);
-    } catch (error) {
-      console.warn('Unable to switch Deriv account:', error);
-    }
+  private nextPrivateReqId(): number {
+    this.privateReqId += 1;
+    return this.privateReqId;
   }
 
   public connect(): void {
@@ -159,20 +74,20 @@ class DerivWebSocketService {
     }
 
     try {
-      this.ws = new WebSocket(`${this.url}?app_id=${encodeURIComponent(this.appId)}`);
+      const ws = new WebSocket(this.publicUrl);
+      this.ws = ws;
 
-      this.ws.onopen = () => {
+      ws.onopen = () => {
+        if (this.ws !== ws) return;
         this.isConnected = true;
         this.notifyHandlers({ msg_type: 'connection_status', connected: true });
         this.startHeartbeat();
-        if (this.apiToken) this.authorize(this.apiToken);
       };
 
-      this.ws.onmessage = (event: MessageEvent) => {
+      ws.onmessage = (event: MessageEvent) => {
+        if (this.ws !== ws) return;
         try {
           const data = JSON.parse(event.data);
-          const passthrough = this.getPassthrough(data);
-          const clientTradeId = passthrough?.clientTradeId as string | undefined;
 
           if (data.msg_type === 'ping') {
             this.latency = this.lastPingTime ? Date.now() - this.lastPingTime : 0;
@@ -183,122 +98,10 @@ class DerivWebSocketService {
           if (data.error) {
             this.notifyHandlers({
               msg_type: 'deriv_error',
-              error: data.error.message || 'Deriv API error',
+              error: data.error.message || 'Deriv market-data error',
               code: data.error.code,
               orig_msg_type: data.msg_type,
-              clientTradeId,
-              stage: passthrough?.stage,
               echo_req: data.echo_req,
-            });
-
-            if (clientTradeId && (data.echo_req?.proposal || data.echo_req?.buy)) {
-              this.notifyHandlers({
-                msg_type: 'trade_error',
-                clientTradeId,
-                stage: passthrough?.stage || (data.echo_req?.proposal ? 'proposal' : 'buy'),
-                error: data.error.message || 'Trade request rejected by Deriv',
-                code: data.error.code,
-              });
-            }
-          }
-
-          if (data.msg_type === 'authorize') {
-            if (data.authorize) {
-              const mappedAccounts = Array.isArray(data.authorize.account_list)
-                ? data.authorize.account_list.map((acc: any) => ({
-                    loginid: acc.loginid,
-                    currency: acc.currency,
-                    is_virtual: Boolean(acc.is_virtual),
-                  }))
-                : undefined;
-
-              this.accountInfo = {
-                isAuthorized: true,
-                appId: this.appId,
-                loginId: data.authorize.loginid,
-                email: data.authorize.email,
-                currency: data.authorize.currency,
-                balance: Number(data.authorize.balance || 0),
-                isVirtual: Boolean(data.authorize.is_virtual),
-                accountsList: mappedAccounts,
-              };
-              this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
-              this.send({ balance: 1, subscribe: 1 });
-            } else if (data.error) {
-              this.accountInfo = { isAuthorized: false, appId: this.appId };
-              this.notifyHandlers({
-                msg_type: 'auth_error',
-                error: data.error.message || 'Authorization failed',
-              });
-            }
-          }
-
-          if (data.msg_type === 'balance' && data.balance) {
-            this.accountInfo = {
-              ...this.accountInfo,
-              balance: Number(data.balance.balance || 0),
-              currency: data.balance.currency || this.accountInfo.currency,
-            };
-            this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
-          }
-
-          if (data.msg_type === 'proposal' && data.proposal) {
-            if (clientTradeId) {
-              this.proposalMeta.set(clientTradeId, data.proposal);
-            }
-
-            this.notifyHandlers({
-              msg_type: 'proposal_success',
-              clientTradeId,
-              proposal: data.proposal,
-            });
-
-            if (clientTradeId && passthrough?.autoBuy === true && data.proposal.id) {
-              const askPrice = Number(data.proposal.ask_price);
-              if (!Number.isFinite(askPrice) || askPrice <= 0) {
-                this.notifyHandlers({
-                  msg_type: 'trade_error',
-                  clientTradeId,
-                  stage: 'proposal',
-                  error: 'Deriv returned an invalid proposal ask price.',
-                });
-              } else {
-                this.send({
-                  buy: data.proposal.id,
-                  price: askPrice,
-                  passthrough: {
-                    clientTradeId,
-                    stage: 'buy',
-                  },
-                });
-              }
-            }
-          }
-
-          if (data.msg_type === 'buy' && data.buy) {
-            const proposal = clientTradeId ? this.proposalMeta.get(clientTradeId) : undefined;
-            this.notifyHandlers({
-              msg_type: 'buy_success',
-              clientTradeId,
-              buy: data.buy,
-              proposal,
-            });
-
-            if (clientTradeId) this.proposalMeta.delete(clientTradeId);
-
-            if (data.buy.contract_id !== undefined) {
-              this.send({
-                proposal_open_contract: 1,
-                contract_id: data.buy.contract_id,
-                subscribe: 1,
-              });
-            }
-          }
-
-          if (data.msg_type === 'proposal_open_contract' && data.proposal_open_contract) {
-            this.notifyHandlers({
-              msg_type: 'contract_update',
-              contract: data.proposal_open_contract,
             });
           }
 
@@ -315,17 +118,20 @@ class DerivWebSocketService {
 
           this.notifyHandlers(data);
         } catch (error) {
-          console.error('Error parsing Deriv WebSocket message:', error);
+          console.error('Error parsing Deriv public WebSocket message:', error);
         }
       };
 
-      this.ws.onerror = (error) => {
+      ws.onerror = (error) => {
+        if (this.ws !== ws) return;
         this.isConnected = false;
         this.notifyHandlers({ msg_type: 'connection_status', connected: false });
-        console.warn('Deriv WebSocket connection error:', error);
+        console.warn('Deriv public WebSocket connection error:', error);
       };
 
-      this.ws.onclose = () => {
+      ws.onclose = () => {
+        if (this.ws !== ws) return;
+        this.ws = null;
         this.isConnected = false;
         this.stopHeartbeat();
         this.notifyHandlers({ msg_type: 'connection_status', connected: false });
@@ -334,57 +140,290 @@ class DerivWebSocketService {
           this.reconnectTimeout = setTimeout(() => {
             this.reconnectTimeout = null;
             this.connect();
-          }, 3000);
+          }, 2500);
         }
       };
     } catch (error) {
       this.isConnected = false;
       this.notifyHandlers({ msg_type: 'connection_status', connected: false });
-      console.error('Failed to initiate Deriv WebSocket connection:', error);
+      console.error('Failed to initiate Deriv public WebSocket connection:', error);
     }
   }
 
-  public authorize(token: string): void {
-    this.apiToken = token.trim();
-    try {
-      if (this.apiToken) sessionStorage.setItem('deriv_api_token', this.apiToken);
-      else sessionStorage.removeItem('deriv_api_token');
-    } catch {}
-    if (this.apiToken) this.send({ authorize: this.apiToken });
+  public connectTradingAccount(mode: AccountMode): Promise<boolean> {
+    if (typeof window === 'undefined') return Promise.resolve(false);
+
+    const requestedMode: AccountMode = mode === 'REAL' ? 'REAL' : 'DEMO';
+    const url = new URL(this.bridgeUrl);
+    url.searchParams.set('mode', requestedMode.toLowerCase());
+    url.searchParams.set('return_origin', window.location.origin);
+
+    const popup = window.open(
+      url.toString(),
+      'deriv-matrix-account',
+      'popup=yes,width=520,height=720,resizable=yes,scrollbars=yes',
+    );
+
+    if (!popup) {
+      this.notifyHandlers({
+        msg_type: 'auth_error',
+        error: 'The secure account window was blocked. Allow pop-ups for this site and try again.',
+      });
+      return Promise.resolve(false);
+    }
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener('message', onMessage);
+        clearInterval(closedWatcher);
+        clearTimeout(timeout);
+        try { if (!popup.closed) popup.close(); } catch {}
+        resolve(ok);
+      };
+
+      const onMessage = (event: MessageEvent) => {
+        if (event.origin !== this.bridgeOrigin) return;
+        const data = event.data || {};
+        if (data.type === 'DERIV_MATRIX_ACCOUNT') {
+          const account = data.account || {};
+          const available = data.available || {};
+          const wsUrl = String(data.ws_url || '');
+          if (!wsUrl.startsWith('wss://') || !account.account_id) {
+            this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv returned an incomplete account session.' });
+            finish(false);
+            return;
+          }
+          this.applyBridgeAccount(account, available, wsUrl);
+          finish(true);
+          return;
+        }
+        if (data.type === 'DERIV_MATRIX_ACCOUNT_ERROR') {
+          this.notifyHandlers({ msg_type: 'auth_error', error: data.error || 'Deriv account authorization failed.' });
+          finish(false);
+        }
+      };
+
+      window.addEventListener('message', onMessage);
+
+      const closedWatcher = setInterval(() => {
+        if (!settled && popup.closed) finish(false);
+      }, 500);
+
+      const timeout = setTimeout(() => {
+        this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv account authorization timed out. Please try again.' });
+        finish(false);
+      }, 180000);
+    });
+  }
+
+  private applyBridgeAccount(account: any, available: any, wsUrl: string): void {
+    const isVirtual = String(account.account_type || '').toLowerCase() === 'demo';
+    const currency = account.currency || 'USD';
+    const accountsList: NonNullable<DerivAccountInfo['accountsList']> = [];
+    if (available?.demo !== false) accountsList.push({ loginid: 'DEMO', currency, is_virtual: true });
+    if (available?.real) accountsList.push({ loginid: 'REAL', currency, is_virtual: false });
+
+    this.accountInfo = {
+      isAuthorized: true,
+      appId: 'oauth2',
+      loginId: String(account.account_id),
+      currency,
+      balance: Number(account.balance || 0),
+      isVirtual,
+      accountsList,
+    };
+    this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+    this.openAccountSocket(wsUrl);
+  }
+
+  private openAccountSocket(url: string): void {
+    this.intentionalAccountClose = true;
+    if (this.accountWs) {
+      try {
+        this.accountWs.onclose = null;
+        this.accountWs.close();
+      } catch {}
+    }
+    this.intentionalAccountClose = false;
+
+    const ws = new WebSocket(url);
+    this.accountWs = ws;
+
+    ws.onopen = () => {
+      if (this.accountWs !== ws) return;
+      this.sendAccount({ balance: 1, subscribe: 1, req_id: this.nextPrivateReqId() });
+      this.notifyHandlers({ msg_type: 'account_connection_status', connected: true });
+      this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+    };
+
+    ws.onmessage = (event: MessageEvent) => {
+      if (this.accountWs !== ws) return;
+      try {
+        const data = JSON.parse(event.data);
+        const reqId = Number(data.req_id);
+
+        if (data.error) {
+          const clientTradeId = this.proposalRequests.get(reqId) || this.buyRequests.get(reqId);
+          if (clientTradeId) {
+            this.proposalRequests.delete(reqId);
+            this.buyRequests.delete(reqId);
+            this.notifyHandlers({
+              msg_type: 'trade_error',
+              clientTradeId,
+              stage: this.proposalRequests.has(reqId) ? 'proposal' : 'buy',
+              error: data.error.message || 'Trade request rejected by Deriv',
+              code: data.error.code,
+            });
+          } else {
+            this.notifyHandlers({
+              msg_type: 'deriv_error',
+              error: data.error.message || 'Deriv account error',
+              code: data.error.code,
+              orig_msg_type: data.msg_type,
+            });
+          }
+          return;
+        }
+
+        if (data.msg_type === 'balance' && data.balance) {
+          this.accountInfo = {
+            ...this.accountInfo,
+            isAuthorized: true,
+            balance: Number(data.balance.balance || 0),
+            currency: data.balance.currency || this.accountInfo.currency,
+          };
+          this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+          return;
+        }
+
+        if (data.msg_type === 'proposal' && data.proposal) {
+          const clientTradeId = this.proposalRequests.get(reqId);
+          if (!clientTradeId) return;
+          this.proposalRequests.delete(reqId);
+          this.proposalMeta.set(clientTradeId, data.proposal);
+          this.notifyHandlers({ msg_type: 'proposal_success', clientTradeId, proposal: data.proposal });
+
+          const askPrice = Number(data.proposal.ask_price);
+          if (!data.proposal.id || !Number.isFinite(askPrice) || askPrice <= 0) {
+            this.notifyHandlers({
+              msg_type: 'trade_error',
+              clientTradeId,
+              stage: 'proposal',
+              error: 'Deriv returned an invalid proposal.',
+            });
+            return;
+          }
+
+          const buyReqId = this.nextPrivateReqId();
+          this.buyRequests.set(buyReqId, clientTradeId);
+          this.sendAccount({ buy: data.proposal.id, price: askPrice, req_id: buyReqId });
+          return;
+        }
+
+        if (data.msg_type === 'buy' && data.buy) {
+          const clientTradeId = this.buyRequests.get(reqId);
+          if (!clientTradeId) return;
+          this.buyRequests.delete(reqId);
+          const proposal = this.proposalMeta.get(clientTradeId);
+          this.proposalMeta.delete(clientTradeId);
+          this.notifyHandlers({ msg_type: 'buy_success', clientTradeId, buy: data.buy, proposal });
+
+          if (data.buy.contract_id !== undefined) {
+            this.sendAccount({
+              proposal_open_contract: 1,
+              contract_id: data.buy.contract_id,
+              subscribe: 1,
+              req_id: this.nextPrivateReqId(),
+            });
+          }
+          return;
+        }
+
+        if (data.msg_type === 'proposal_open_contract' && data.proposal_open_contract) {
+          this.notifyHandlers({ msg_type: 'contract_update', contract: data.proposal_open_contract });
+          return;
+        }
+
+        this.notifyHandlers(data);
+      } catch (error) {
+        console.error('Error parsing Deriv account WebSocket message:', error);
+      }
+    };
+
+    ws.onerror = (error) => {
+      if (this.accountWs !== ws) return;
+      console.warn('Deriv account WebSocket connection error:', error);
+      this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
+    };
+
+    ws.onclose = () => {
+      if (this.accountWs !== ws) return;
+      this.accountWs = null;
+      this.proposalRequests.clear();
+      this.buyRequests.clear();
+      this.proposalMeta.clear();
+      this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
+      if (!this.intentionalAccountClose) {
+        this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
+        this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+      }
+    };
+  }
+
+  public switchAccount(loginId: string): void {
+    const upper = String(loginId || '').toUpperCase();
+    if (upper === 'DEMO') {
+      void this.connectTradingAccount('DEMO');
+      return;
+    }
+    if (upper === 'REAL') {
+      void this.connectTradingAccount('REAL');
+      return;
+    }
+
+    const match = this.accountInfo.accountsList?.find((account) => account.loginid === loginId);
+    if (match) void this.connectTradingAccount(match.is_virtual ? 'DEMO' : 'REAL');
+  }
+
+  public authorize(_token: string): void {
+    this.notifyHandlers({
+      msg_type: 'auth_error',
+      error: 'Manual browser tokens are disabled in this build. Use the DEMO / REAL account selector.',
+    });
   }
 
   public logout(): void {
-    this.apiToken = '';
+    this.intentionalAccountClose = true;
+    if (this.accountWs) {
+      try {
+        this.accountWs.onclose = null;
+        this.accountWs.close();
+      } catch {}
+      this.accountWs = null;
+    }
+    this.intentionalAccountClose = false;
+    this.proposalRequests.clear();
+    this.buyRequests.clear();
     this.proposalMeta.clear();
-    this.accountInfo = { isAuthorized: false, appId: this.appId };
-    try {
-      sessionStorage.removeItem('deriv_api_token');
-      sessionStorage.removeItem('deriv_accounts_list');
-    } catch {}
+    this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
+    this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
     this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
-    this.reconnect(this.appId, '');
+  }
+
+  public getOAuthRedirectUrl(): string {
+    const url = new URL(this.bridgeUrl);
+    if (typeof window !== 'undefined') url.searchParams.set('return_origin', window.location.origin);
+    return url.toString();
   }
 
   public connectPublicStream(): void {
-    this.reconnect(this.appId, '');
+    this.reconnect();
   }
 
-  public reconnect(newAppId?: string, newToken?: string): void {
-    if (newAppId?.trim()) {
-      this.appId = newAppId.trim();
-      try {
-        localStorage.setItem('deriv_app_id', this.appId);
-      } catch {}
-    }
-
-    if (newToken !== undefined) {
-      this.apiToken = newToken.trim();
-      try {
-        if (this.apiToken) sessionStorage.setItem('deriv_api_token', this.apiToken);
-        else sessionStorage.removeItem('deriv_api_token');
-      } catch {}
-    }
-
+  public reconnect(): void {
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
@@ -432,13 +471,21 @@ class DerivWebSocketService {
     return false;
   }
 
+  private sendAccount(request: any): boolean {
+    if (this.accountWs?.readyState === WebSocket.OPEN) {
+      this.accountWs.send(JSON.stringify(request));
+      return true;
+    }
+    return false;
+  }
+
   public placeContract(params: PlaceContractParams): boolean {
-    if (!this.accountInfo.isAuthorized || !this.isConnected) {
+    if (!this.accountInfo.isAuthorized || this.accountWs?.readyState !== WebSocket.OPEN) {
       this.notifyHandlers({
         msg_type: 'trade_error',
         clientTradeId: params.clientTradeId,
         stage: 'preflight',
-        error: 'Connect and authorize a Deriv account before placing a contract.',
+        error: 'Select a live Deriv DEMO or REAL account before placing a contract.',
       });
       return false;
     }
@@ -454,6 +501,9 @@ class DerivWebSocketService {
       return false;
     }
 
+    const reqId = this.nextPrivateReqId();
+    this.proposalRequests.set(reqId, params.clientTradeId);
+
     const proposalRequest: any = {
       proposal: 1,
       amount,
@@ -462,23 +512,19 @@ class DerivWebSocketService {
       currency: this.accountInfo.currency || 'USD',
       duration: params.duration || 1,
       duration_unit: params.duration_unit || 't',
-      symbol: params.symbol,
-      passthrough: {
-        clientTradeId: params.clientTradeId,
-        stage: 'proposal',
-        autoBuy: true,
-      },
+      underlying_symbol: params.symbol,
+      req_id: reqId,
     };
 
     if (params.barrier !== undefined && params.barrier !== '') {
       proposalRequest.barrier = String(params.barrier);
     }
 
-    return this.send(proposalRequest);
+    const sent = this.sendAccount(proposalRequest);
+    if (!sent) this.proposalRequests.delete(reqId);
+    return sent;
   }
 
-  // Compatibility alias used by existing UI components. It now always performs
-  // the real Deriv proposal -> buy flow instead of sending a local/simulated order.
   public buyContract(params: Omit<PlaceContractParams, 'clientTradeId'> & { clientTradeId?: string }): boolean {
     const clientTradeId = params.clientTradeId || `client-${Date.now()}`;
     return this.placeContract({ ...params, clientTradeId });
