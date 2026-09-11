@@ -1,6 +1,6 @@
 {
-  "name": "Deriv Market Matrix & Super Recovery Engine",
-  "description": "Real-time Deriv market analysis tool identifying strongest-to-win markets, matches digit indicators, historical tick trends, and algorithmic X2/X4 super loss recovery protocols.",
+  "name": "Deriv Market Matrix & Recovery Engine",
+  "description": "Deriv WebSocket market analysis with observed digit statistics, authenticated proposal/buy execution, live balance updates, contract settlement monitoring, and configurable recovery risk controls.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
