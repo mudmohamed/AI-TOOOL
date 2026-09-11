@@ -1,5 +1,18 @@
 import { DigitStat, MarketAnalysis } from '../types';
 
+const PIP_BY_SYMBOL: Record<string, number> = {
+  R_10: 3,
+  R_25: 3,
+  R_50: 4,
+  R_75: 4,
+  R_100: 2,
+  '1HZ10V': 2,
+  '1HZ25V': 2,
+  '1HZ50V': 2,
+  '1HZ75V': 2,
+  '1HZ100V': 2,
+};
+
 export function calculateRSI(prices: number[], period = 14): number {
   if (prices.length < period + 1) return 50;
   const changes = prices.slice(1).map((price, i) => price - prices[i]);
@@ -33,9 +46,7 @@ export function calculateEMA(prices: number[], period: number): number {
   }
   const k = 2 / (period + 1);
   let ema = prices.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
-  for (let i = period; i < prices.length; i += 1) {
-    ema = prices[i] * k + ema * (1 - k);
-  }
+  for (let i = period; i < prices.length; i += 1) ema = prices[i] * k + ema * (1 - k);
   return Number(ema.toFixed(4));
 }
 
@@ -159,9 +170,8 @@ export function analyzeDigits(digits: number[]): {
 }
 
 /**
- * Produces a ranking score from observed Deriv ticks. `winScore` is retained in
- * the public interface for compatibility, but it is an evidence/signal score,
- * NOT a forecasted win percentage and never guarantees an outcome.
+ * `winScore` is retained for UI compatibility but is an evidence/ranking score,
+ * not a predicted win percentage.
  */
 export function evaluateMarketStrength(
   symbol: string,
@@ -170,9 +180,10 @@ export function evaluateMarketStrength(
   digits: number[],
 ): MarketAnalysis {
   const currentPrice = prices[prices.length - 1] || 0;
+  const pip = PIP_BY_SYMBOL[symbol] ?? 2;
   const lastDigit = digits.length ? digits[digits.length - 1] : 0;
   const startPrice = prices[0] || currentPrice;
-  const priceChange = Number((currentPrice - startPrice).toFixed(4));
+  const priceChange = Number((currentPrice - startPrice).toFixed(pip));
   const priceChangePct = startPrice ? Number(((priceChange / startPrice) * 100).toFixed(2)) : 0;
   const rsi = calculateRSI(prices);
   const ema9 = calculateEMA(prices, 9);
@@ -238,6 +249,7 @@ export function evaluateMarketStrength(
     symbol,
     displayName,
     currentPrice,
+    pip,
     lastDigit,
     priceChange,
     priceChangePct,
