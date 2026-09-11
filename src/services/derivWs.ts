@@ -2,24 +2,35 @@ import { DerivAccountInfo } from '../types';
 
 type MessageHandler = (data: any) => void;
 
+export interface PlaceContractParams {
+  clientTradeId: string;
+  contract_type: string;
+  symbol: string;
+  amount: number;
+  duration?: number;
+  duration_unit?: string;
+  barrier?: string | number;
+}
+
 class DerivWebSocketService {
   private ws: WebSocket | null = null;
-  private appId: string = '1089';
-  private apiToken: string = '';
-  private url: string = 'wss://ws.derivws.com/websockets/v3';
-  private pingInterval: any = null;
-  private reconnectTimeout: any = null;
-  private messageHandlers: Set<MessageHandler> = new Set();
-  private isConnected: boolean = false;
-  private latency: number = 0;
-  private lastPingTime: number = 0;
-  private subscribedSymbols: Set<string> = new Set(['1HZ10V']);
+  private appId = '1089';
+  private apiToken = '';
+  private readonly url = 'wss://ws.derivws.com/websockets/v3';
+  private pingInterval: ReturnType<typeof setInterval> | null = null;
+  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  private messageHandlers = new Set<MessageHandler>();
+  private isConnected = false;
+  private latency = 0;
+  private lastPingTime = 0;
+  private subscribedSymbols = new Set<string>();
+  private proposalMeta = new Map<string, any>();
   private accountInfo: DerivAccountInfo = {
     isAuthorized: false,
     appId: '1089',
   };
 
-  private symbolPipSizes: Map<string, number> = new Map([
+  private symbolPipSizes = new Map<string, number>([
     ['R_10', 3],
     ['R_25', 3],
     ['R_50', 4],
@@ -36,47 +47,37 @@ class DerivWebSocketService {
     ['JD50', 2],
   ]);
 
-  // This cache is populated only by real Deriv tick messages.
-  private symbolCurrentPrices: Map<string, number> = new Map();
+  private symbolCurrentPrices = new Map<string, number>();
 
   constructor() {
-    // Check if redirected from Deriv Direct OAuth.
     this.parseOAuthCallback();
 
-    // Attempt to restore saved app_id and token from localStorage if available.
     try {
       const savedAppId = localStorage.getItem('deriv_app_id');
-      const savedToken = localStorage.getItem('deriv_api_token');
-      if (savedAppId) {
-        this.appId = savedAppId;
-      }
-      if (savedToken) {
-        this.apiToken = savedToken;
-      }
+      const savedToken = sessionStorage.getItem('deriv_api_token');
+      if (savedAppId) this.appId = savedAppId;
+      if (savedToken) this.apiToken = savedToken;
     } catch {
-      // localStorage may not be accessible in all environments.
+      // Storage can be unavailable in restricted browser contexts.
     }
 
     this.connect();
   }
 
-  /**
-   * Automatically parses tokens and accounts if redirected back from official Deriv OAuth
-   * e.g. ?acct1=CR123&token1=xxx&cur1=USD&acct2=VRTC456&token2=yyy&cur2=USD
-   */
+  private getPassthrough(data: any): any {
+    return data?.echo_req?.passthrough || data?.passthrough || null;
+  }
+
   public parseOAuthCallback(): boolean {
     if (typeof window === 'undefined') return false;
 
     try {
-      // Check query string (?acct1=...) or hash fragment (#acct1=...).
       let queryString = '';
-      if (window.location.search && window.location.search.includes('token')) {
+      if (window.location.search?.includes('token')) {
         queryString = window.location.search.replace(/^\?/, '');
-      } else if (window.location.hash && window.location.hash.includes('token')) {
+      } else if (window.location.hash?.includes('token')) {
         queryString = window.location.hash.replace(/^#/, '');
-        if (queryString.includes('?')) {
-          queryString = queryString.split('?')[1];
-        }
+        if (queryString.includes('?')) queryString = queryString.split('?')[1];
       }
 
       if (!queryString) return false;
@@ -96,69 +97,57 @@ class DerivWebSocketService {
         const token = params.get(`token${index}`) || '';
         const currency = params.get(`cur${index}`) || 'USD';
         const is_virtual = loginid.startsWith('VRTC') || loginid.startsWith('VR');
-
         if (token) {
           accountsList.push({ loginid, currency, is_virtual, token });
-          if (!primaryToken) {
-            primaryToken = token;
-          }
+          if (!primaryToken) primaryToken = token;
         }
-        index++;
+        index += 1;
       }
 
-      // Also check single token param ?token=...
       if (accountsList.length === 0 && params.has('token')) {
-        const singleToken = params.get('token') || '';
-        const singleAcct = params.get('acct') || 'CR';
-        if (singleToken) {
-          primaryToken = singleToken;
+        const token = params.get('token') || '';
+        const loginid = params.get('acct') || '';
+        if (token) {
+          primaryToken = token;
           accountsList.push({
-            loginid: singleAcct,
+            loginid,
             currency: params.get('cur') || 'USD',
-            is_virtual: singleAcct.startsWith('VR'),
-            token: singleToken,
+            is_virtual: loginid.startsWith('VRTC') || loginid.startsWith('VR'),
+            token,
           });
         }
       }
 
-      if (primaryToken && accountsList.length > 0) {
-        this.apiToken = primaryToken;
-        localStorage.setItem('deriv_api_token', primaryToken);
-        localStorage.setItem('deriv_accounts_list', JSON.stringify(accountsList));
+      if (!primaryToken) return false;
 
-        // Clean query parameters from URL without reloading page.
-        const cleanUrl = window.location.pathname;
-        window.history.replaceState({}, document.title, cleanUrl);
+      this.apiToken = primaryToken;
+      sessionStorage.setItem('deriv_api_token', primaryToken);
+      sessionStorage.setItem('deriv_accounts_list', JSON.stringify(accountsList));
 
-        console.log(
-          `Successfully authenticated directly via Deriv OAuth with ${accountsList.length} accounts`,
-        );
-        return true;
-      }
-    } catch (e) {
-      console.warn('Error parsing Deriv OAuth callback params:', e);
+      const cleanUrl = `${window.location.pathname}${window.location.hash && !window.location.hash.includes('token') ? window.location.hash : ''}`;
+      window.history.replaceState({}, document.title, cleanUrl || '/');
+      return true;
+    } catch (error) {
+      console.warn('Unable to parse Deriv OAuth callback:', error);
+      return false;
     }
-    return false;
   }
 
   public getOAuthRedirectUrl(customAppId?: string): string {
-    const id = customAppId || this.appId || '1089';
-    return `https://oauth.deriv.com/oauth2/authorize?app_id=${id}&l=EN&brand=deriv`;
+    const id = customAppId?.trim() || this.appId;
+    return `https://oauth.deriv.com/oauth2/authorize?app_id=${encodeURIComponent(id)}&l=EN&brand=deriv`;
   }
 
   public switchAccount(loginId: string): void {
     try {
-      const savedAccountsStr = localStorage.getItem('deriv_accounts_list');
-      if (savedAccountsStr) {
-        const list = JSON.parse(savedAccountsStr);
-        const match = list.find((a: any) => a.loginid === loginId);
-        if (match && match.token) {
-          this.authorize(match.token);
-          return;
-        }
-      }
-    } catch {}
-    console.warn(`Could not switch to account ${loginId}: token not found`);
+      const saved = sessionStorage.getItem('deriv_accounts_list');
+      if (!saved) return;
+      const list = JSON.parse(saved);
+      const match = Array.isArray(list) ? list.find((a: any) => a.loginid === loginId) : null;
+      if (match?.token) this.authorize(match.token);
+    } catch (error) {
+      console.warn('Unable to switch Deriv account:', error);
+    }
   }
 
   public connect(): void {
@@ -170,30 +159,49 @@ class DerivWebSocketService {
     }
 
     try {
-      this.ws = new WebSocket(`${this.url}?app_id=${this.appId}`);
+      this.ws = new WebSocket(`${this.url}?app_id=${encodeURIComponent(this.appId)}`);
 
       this.ws.onopen = () => {
         this.isConnected = true;
         this.notifyHandlers({ msg_type: 'connection_status', connected: true });
         this.startHeartbeat();
-
-        // If we have an API token saved, attempt authorization immediately.
-        if (this.apiToken) {
-          this.authorize(this.apiToken);
-        }
+        if (this.apiToken) this.authorize(this.apiToken);
       };
 
       this.ws.onmessage = (event: MessageEvent) => {
         try {
           const data = JSON.parse(event.data);
+          const passthrough = this.getPassthrough(data);
+          const clientTradeId = passthrough?.clientTradeId as string | undefined;
 
           if (data.msg_type === 'ping') {
-            this.latency = Date.now() - this.lastPingTime;
+            this.latency = this.lastPingTime ? Date.now() - this.lastPingTime : 0;
             this.notifyHandlers({ msg_type: 'latency_update', latency: this.latency });
             return;
           }
 
-          // Handle authorization response.
+          if (data.error) {
+            this.notifyHandlers({
+              msg_type: 'deriv_error',
+              error: data.error.message || 'Deriv API error',
+              code: data.error.code,
+              orig_msg_type: data.msg_type,
+              clientTradeId,
+              stage: passthrough?.stage,
+              echo_req: data.echo_req,
+            });
+
+            if (clientTradeId && (data.echo_req?.proposal || data.echo_req?.buy)) {
+              this.notifyHandlers({
+                msg_type: 'trade_error',
+                clientTradeId,
+                stage: passthrough?.stage || (data.echo_req?.proposal ? 'proposal' : 'buy'),
+                error: data.error.message || 'Trade request rejected by Deriv',
+                code: data.error.code,
+              });
+            }
+          }
+
           if (data.msg_type === 'authorize') {
             if (data.authorize) {
               const mappedAccounts = Array.isArray(data.authorize.account_list)
@@ -207,7 +215,6 @@ class DerivWebSocketService {
               this.accountInfo = {
                 isAuthorized: true,
                 appId: this.appId,
-                token: this.apiToken,
                 loginId: data.authorize.loginid,
                 email: data.authorize.email,
                 currency: data.authorize.currency,
@@ -216,14 +223,9 @@ class DerivWebSocketService {
                 accountsList: mappedAccounts,
               };
               this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
-
-              // Subscribe to the real Deriv balance stream.
               this.send({ balance: 1, subscribe: 1 });
             } else if (data.error) {
-              this.accountInfo = {
-                isAuthorized: false,
-                appId: this.appId,
-              };
+              this.accountInfo = { isAuthorized: false, appId: this.appId };
               this.notifyHandlers({
                 msg_type: 'auth_error',
                 error: data.error.message || 'Authorization failed',
@@ -231,18 +233,6 @@ class DerivWebSocketService {
             }
           }
 
-          // Handle general Deriv API errors.
-          if (data.error) {
-            console.warn('Deriv API response error:', data.error);
-            this.notifyHandlers({
-              msg_type: 'deriv_error',
-              error: data.error.message || 'Deriv API error',
-              code: data.error.code,
-              orig_msg_type: data.msg_type,
-            });
-          }
-
-          // Handle real balance stream response.
           if (data.msg_type === 'balance' && data.balance) {
             this.accountInfo = {
               ...this.accountInfo,
@@ -252,22 +242,59 @@ class DerivWebSocketService {
             this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
           }
 
-          // Handle real contract buy response.
-          if (data.msg_type === 'buy' && data.buy) {
+          if (data.msg_type === 'proposal' && data.proposal) {
+            if (clientTradeId) {
+              this.proposalMeta.set(clientTradeId, data.proposal);
+            }
+
             this.notifyHandlers({
-              msg_type: 'buy_success',
-              buy: data.buy,
+              msg_type: 'proposal_success',
+              clientTradeId,
+              proposal: data.proposal,
             });
 
-            // Track the exact real contract returned by Deriv.
-            this.send({
-              proposal_open_contract: 1,
-              contract_id: data.buy.contract_id,
-              subscribe: 1,
-            });
+            if (clientTradeId && passthrough?.autoBuy === true && data.proposal.id) {
+              const askPrice = Number(data.proposal.ask_price);
+              if (!Number.isFinite(askPrice) || askPrice <= 0) {
+                this.notifyHandlers({
+                  msg_type: 'trade_error',
+                  clientTradeId,
+                  stage: 'proposal',
+                  error: 'Deriv returned an invalid proposal ask price.',
+                });
+              } else {
+                this.send({
+                  buy: data.proposal.id,
+                  price: askPrice,
+                  passthrough: {
+                    clientTradeId,
+                    stage: 'buy',
+                  },
+                });
+              }
+            }
           }
 
-          // Handle real open-contract updates and settlement.
+          if (data.msg_type === 'buy' && data.buy) {
+            const proposal = clientTradeId ? this.proposalMeta.get(clientTradeId) : undefined;
+            this.notifyHandlers({
+              msg_type: 'buy_success',
+              clientTradeId,
+              buy: data.buy,
+              proposal,
+            });
+
+            if (clientTradeId) this.proposalMeta.delete(clientTradeId);
+
+            if (data.buy.contract_id !== undefined) {
+              this.send({
+                proposal_open_contract: 1,
+                contract_id: data.buy.contract_id,
+                subscribe: 1,
+              });
+            }
+          }
+
           if (data.msg_type === 'proposal_open_contract' && data.proposal_open_contract) {
             this.notifyHandlers({
               msg_type: 'contract_update',
@@ -275,30 +302,27 @@ class DerivWebSocketService {
             });
           }
 
-          // Cache pip_size only from real Deriv tick messages when supplied.
-          if (data.tick && data.tick.pip_size !== undefined && data.tick.symbol) {
-            this.symbolPipSizes.set(data.tick.symbol, data.tick.pip_size);
+          if (data.tick?.pip_size !== undefined && data.tick?.symbol) {
+            this.symbolPipSizes.set(data.tick.symbol, Number(data.tick.pip_size));
           }
 
-          // Cache prices only when a real Deriv tick is received.
           if (data.msg_type === 'tick' && data.tick) {
-            if (data.tick.symbol && data.tick.quote !== undefined) {
-              this.symbolCurrentPrices.set(data.tick.symbol, Number(data.tick.quote));
+            const quote = Number(data.tick.quote);
+            if (data.tick.symbol && Number.isFinite(quote)) {
+              this.symbolCurrentPrices.set(data.tick.symbol, quote);
             }
           }
 
-          // Real history responses, proposal responses, ticks, and every other Deriv
-          // message are forwarded untouched to the application listeners.
           this.notifyHandlers(data);
-        } catch (e) {
-          console.error('Error parsing Deriv WebSocket message:', e);
+        } catch (error) {
+          console.error('Error parsing Deriv WebSocket message:', error);
         }
       };
 
       this.ws.onerror = (error) => {
         this.isConnected = false;
-        console.warn('Deriv WebSocket connection error:', error);
         this.notifyHandlers({ msg_type: 'connection_status', connected: false });
+        console.warn('Deriv WebSocket connection error:', error);
       };
 
       this.ws.onclose = () => {
@@ -306,7 +330,6 @@ class DerivWebSocketService {
         this.stopHeartbeat();
         this.notifyHandlers({ msg_type: 'connection_status', connected: false });
 
-        // Auto-reconnect after 3 seconds. No simulated data is emitted while offline.
         if (!this.reconnectTimeout) {
           this.reconnectTimeout = setTimeout(() => {
             this.reconnectTimeout = null;
@@ -314,46 +337,40 @@ class DerivWebSocketService {
           }, 3000);
         }
       };
-    } catch (err) {
+    } catch (error) {
       this.isConnected = false;
-      console.error('Failed to initiate Deriv WebSocket connection:', err);
       this.notifyHandlers({ msg_type: 'connection_status', connected: false });
+      console.error('Failed to initiate Deriv WebSocket connection:', error);
     }
   }
 
   public authorize(token: string): void {
     this.apiToken = token.trim();
     try {
-      localStorage.setItem('deriv_api_token', this.apiToken);
+      if (this.apiToken) sessionStorage.setItem('deriv_api_token', this.apiToken);
+      else sessionStorage.removeItem('deriv_api_token');
     } catch {}
-    this.send({ authorize: this.apiToken });
+    if (this.apiToken) this.send({ authorize: this.apiToken });
   }
 
   public logout(): void {
     this.apiToken = '';
-    this.accountInfo = {
-      isAuthorized: false,
-      appId: this.appId,
-    };
+    this.proposalMeta.clear();
+    this.accountInfo = { isAuthorized: false, appId: this.appId };
     try {
-      localStorage.removeItem('deriv_api_token');
+      sessionStorage.removeItem('deriv_api_token');
+      sessionStorage.removeItem('deriv_accounts_list');
     } catch {}
     this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
-
-    // Reconnect cleanly to reset session.
-    this.reconnect(this.appId);
+    this.reconnect(this.appId, '');
   }
 
-  /**
-   * Connects immediately to the public Deriv WebSocket stream using default App ID 1089
-   * with no token or login ID required.
-   */
   public connectPublicStream(): void {
-    this.reconnect('1089', '');
+    this.reconnect(this.appId, '');
   }
 
   public reconnect(newAppId?: string, newToken?: string): void {
-    if (newAppId && newAppId.trim()) {
+    if (newAppId?.trim()) {
       this.appId = newAppId.trim();
       try {
         localStorage.setItem('deriv_app_id', this.appId);
@@ -363,11 +380,8 @@ class DerivWebSocketService {
     if (newToken !== undefined) {
       this.apiToken = newToken.trim();
       try {
-        if (this.apiToken) {
-          localStorage.setItem('deriv_api_token', this.apiToken);
-        } else {
-          localStorage.removeItem('deriv_api_token');
-        }
+        if (this.apiToken) sessionStorage.setItem('deriv_api_token', this.apiToken);
+        else sessionStorage.removeItem('deriv_api_token');
       } catch {}
     }
 
@@ -398,70 +412,81 @@ class DerivWebSocketService {
     return this.symbolPipSizes.get(symbol) ?? 2;
   }
 
+  public getLastRealPrice(symbol: string): number | undefined {
+    return this.symbolCurrentPrices.get(symbol);
+  }
+
   public extractLastDigit(quote: number, symbol: string): number {
+    if (!Number.isFinite(quote)) return 0;
     const pip = this.getPipSize(symbol);
-    const quoteStr = quote.toFixed(pip);
-    const lastChar = quoteStr.charAt(quoteStr.length - 1);
-    const digit = parseInt(lastChar, 10);
-    return isNaN(digit) ? 0 : digit;
+    const quoteStr = Number(quote).toFixed(pip);
+    const digit = Number.parseInt(quoteStr.charAt(quoteStr.length - 1), 10);
+    return Number.isNaN(digit) ? 0 : digit;
   }
 
-  public send(request: any): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+  public send(request: any): boolean {
+    if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(request));
-      return;
+      return true;
     }
-
-    // If the real socket is still connecting, briefly wait for it. If it never
-    // opens, the request is abandoned rather than being simulated locally.
-    const checkAndSend = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify(request));
-        clearInterval(checkAndSend);
-      }
-    }, 200);
-
-    setTimeout(() => clearInterval(checkAndSend), 5000);
+    return false;
   }
 
-  public buyContract(params: {
-    contract_type: string;
-    symbol: string;
-    amount: number;
-    duration?: number;
-    duration_unit?: string;
-    barrier?: string | number;
-  }): void {
-    if (!this.accountInfo.isAuthorized) {
-      return;
+  public placeContract(params: PlaceContractParams): boolean {
+    if (!this.accountInfo.isAuthorized || !this.isConnected) {
+      this.notifyHandlers({
+        msg_type: 'trade_error',
+        clientTradeId: params.clientTradeId,
+        stage: 'preflight',
+        error: 'Connect and authorize a Deriv account before placing a contract.',
+      });
+      return false;
     }
 
-    const buyRequest: any = {
-      buy: 1,
-      price: params.amount,
-      parameters: {
-        amount: params.amount,
-        basis: 'stake',
-        contract_type: params.contract_type,
-        currency: this.accountInfo.currency || 'USD',
-        duration: params.duration || 1,
-        duration_unit: params.duration_unit || 't',
-        symbol: params.symbol,
+    const amount = Number(params.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      this.notifyHandlers({
+        msg_type: 'trade_error',
+        clientTradeId: params.clientTradeId,
+        stage: 'preflight',
+        error: 'Stake amount must be greater than zero.',
+      });
+      return false;
+    }
+
+    const proposalRequest: any = {
+      proposal: 1,
+      amount,
+      basis: 'stake',
+      contract_type: params.contract_type,
+      currency: this.accountInfo.currency || 'USD',
+      duration: params.duration || 1,
+      duration_unit: params.duration_unit || 't',
+      symbol: params.symbol,
+      passthrough: {
+        clientTradeId: params.clientTradeId,
+        stage: 'proposal',
+        autoBuy: true,
       },
     };
 
-    if (params.barrier !== undefined) {
-      buyRequest.parameters.barrier = String(params.barrier);
+    if (params.barrier !== undefined && params.barrier !== '') {
+      proposalRequest.barrier = String(params.barrier);
     }
 
-    this.send(buyRequest);
+    return this.send(proposalRequest);
+  }
+
+  // Compatibility alias used by existing UI components. It now always performs
+  // the real Deriv proposal -> buy flow instead of sending a local/simulated order.
+  public buyContract(params: Omit<PlaceContractParams, 'clientTradeId'> & { clientTradeId?: string }): boolean {
+    const clientTradeId = params.clientTradeId || `client-${Date.now()}`;
+    return this.placeContract({ ...params, clientTradeId });
   }
 
   public subscribeTicks(symbol: string): void {
     this.subscribedSymbols.clear();
     this.subscribedSymbols.add(symbol);
-
-    // Forget previous real tick streams before subscribing to the focused market.
     this.send({ forget_all: 'ticks' });
     this.send({ ticks: symbol, subscribe: 1 });
   }
@@ -472,17 +497,12 @@ class DerivWebSocketService {
   }
 
   public subscribeMultipleTicks(symbols: string[]): void {
-    symbols.forEach((sym) => {
-      this.subscribedSymbols.add(sym);
-      this.send({ ticks: sym, subscribe: 1 });
-    });
+    this.subscribedSymbols = new Set(symbols);
+    this.send({ forget_all: 'ticks' });
+    symbols.forEach((symbol) => this.send({ ticks: symbol, subscribe: 1 }));
   }
 
-  /**
-   * Requests true historical ticks directly from Deriv.
-   * No generated seed history or random fallback data is injected.
-   */
-  public requestTickHistory(symbol: string, count: number = 500): void {
+  public requestTickHistory(symbol: string, count = 500): void {
     this.send({
       ticks_history: symbol,
       end: 'latest',
@@ -493,39 +513,31 @@ class DerivWebSocketService {
   }
 
   public requestActiveSymbols(): void {
-    this.send({
-      active_symbols: 'brief',
-      product_type: 'basic',
-    });
+    this.send({ active_symbols: 'brief', product_type: 'basic' });
   }
 
   public addListener(handler: MessageHandler): () => void {
     this.messageHandlers.add(handler);
-
-    // Report the actual WebSocket state to newly attached listeners.
-    setTimeout(() => {
+    queueMicrotask(() => {
       try {
         handler({ msg_type: 'connection_status', connected: this.isConnected });
         handler({ msg_type: 'latency_update', latency: this.latency });
         if (this.accountInfo.isAuthorized) {
           handler({ msg_type: 'account_update', account: this.accountInfo });
         }
-      } catch (err) {
-        console.error('Error in initial listener dispatch:', err);
+      } catch (error) {
+        console.error('Error in initial listener dispatch:', error);
       }
-    }, 0);
-
-    return () => {
-      this.messageHandlers.delete(handler);
-    };
+    });
+    return () => this.messageHandlers.delete(handler);
   }
 
   private notifyHandlers(data: any): void {
     this.messageHandlers.forEach((handler) => {
       try {
         handler(data);
-      } catch (err) {
-        console.error('Handler error:', err);
+      } catch (error) {
+        console.error('Deriv listener error:', error);
       }
     });
   }
@@ -533,13 +545,11 @@ class DerivWebSocketService {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.ping();
-    this.pingInterval = setInterval(() => {
-      this.ping();
-    }, 15000);
+    this.pingInterval = setInterval(() => this.ping(), 15000);
   }
 
   private ping(): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
       this.lastPingTime = Date.now();
       this.send({ ping: 1 });
     }
@@ -553,10 +563,7 @@ class DerivWebSocketService {
   }
 
   public getConnectionState(): { connected: boolean; latency: number } {
-    return {
-      connected: this.isConnected,
-      latency: this.latency,
-    };
+    return { connected: this.isConnected, latency: this.latency };
   }
 }
 
