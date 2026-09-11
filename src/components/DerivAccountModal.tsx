@@ -9,7 +9,6 @@ import { derivService } from '../services/derivWs';
 import {
   ShieldCheck,
   LogOut,
-  ExternalLink,
   X,
   Radio,
   CheckCircle2,
@@ -18,6 +17,7 @@ import {
   Clipboard,
   ArrowRight,
   AlertTriangle,
+  WalletCards,
 } from 'lucide-react';
 
 interface DerivAccountModalProps {
@@ -38,6 +38,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
   accountInfo,
   connected,
   latency,
+  onToggleAccountMode,
 }) => {
   const [showManualToken, setShowManualToken] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
@@ -46,10 +47,26 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleConnectDerivOAuth = () => {
+  const actualMode: 'DEMO' | 'REAL' = accountInfo.isAuthorized && accountInfo.isVirtual ? 'DEMO' : 'REAL';
+
+  const handleChooseMode = (requested: 'DEMO' | 'REAL') => {
     setAuthError(null);
-    const oauthUrl = derivService.getOAuthRedirectUrl();
-    window.location.assign(oauthUrl);
+
+    if (accountInfo.isAuthorized) {
+      const currentIsRequested = actualMode === requested;
+      const linked = accountInfo.accountsList || [];
+      const match = linked.find((account) => requested === 'DEMO' ? account.is_virtual : !account.is_virtual);
+      if (currentIsRequested || match) {
+        onToggleAccountMode(requested);
+        if (currentIsRequested) onClose();
+        return;
+      }
+    }
+
+    try {
+      localStorage.setItem('deriv_requested_mode', requested);
+    } catch {}
+    window.location.assign(derivService.getOAuthRedirectUrl());
   };
 
   const handlePasteToken = async () => {
@@ -81,11 +98,11 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
         <div className="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/90">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
-              <ShieldCheck className="w-5 h-5 text-emerald-400" />
+              <WalletCards className="w-5 h-5 text-emerald-400" />
             </div>
             <div>
-              <h3 className="text-sm sm:text-base font-black text-white uppercase tracking-tight">Connect Deriv Account</h3>
-              <p className="text-[11px] text-slate-400">Official authorization, live balance and real contract settlement</p>
+              <h3 className="text-sm sm:text-base font-black text-white uppercase tracking-tight">Trading Account</h3>
+              <p className="text-[11px] text-slate-400">Choose your Deriv DEMO or REAL account</p>
             </div>
           </div>
           <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center">
@@ -101,7 +118,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
             </div>
             <div className="flex items-center gap-2 text-[11px] text-slate-400">
               <Radio className={`w-3.5 h-3.5 ${connected ? 'text-emerald-400' : 'text-rose-400'}`} />
-              <span>{connected ? `Connected${latency > 0 ? ` (${latency}ms)` : ''}` : 'Disconnected'}</span>
+              <span>{connected ? `Live${latency > 0 ? ` (${latency}ms)` : ''}` : 'Disconnected'}</span>
             </div>
           </div>
 
@@ -114,7 +131,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
                     <div className="text-xs font-mono font-bold text-white flex items-center gap-2 flex-wrap">
                       <span>{accountInfo.loginId}</span>
                       <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${accountInfo.isVirtual ? 'bg-amber-400/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
-                        {accountInfo.isVirtual ? 'VIRTUAL' : 'REAL'}
+                        {accountInfo.isVirtual ? 'DEMO' : 'REAL'}
                       </span>
                     </div>
                     <div className="text-[11px] text-slate-400 font-mono">{accountInfo.email || 'Authorized Deriv account'}</div>
@@ -128,20 +145,22 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
                 </div>
               </div>
 
-              {accountInfo.accountsList && accountInfo.accountsList.length > 1 && (
-                <div className="pt-3 border-t border-emerald-500/20 flex items-center justify-between gap-3 text-xs font-mono">
-                  <span className="text-slate-400">Switch linked account:</span>
-                  <select
-                    value={accountInfo.loginId}
-                    onChange={(e) => derivService.switchAccount(e.target.value)}
-                    className="bg-slate-950 text-slate-200 border border-slate-700 rounded-xl px-3 py-1.5 focus:outline-none focus:border-emerald-500"
-                  >
-                    {accountInfo.accountsList.map((acc) => (
-                      <option key={acc.loginid} value={acc.loginid}>{acc.loginid} ({acc.is_virtual ? 'Virtual' : 'Real'})</option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-emerald-500/20">
+                <button
+                  type="button"
+                  onClick={() => handleChooseMode('DEMO')}
+                  className={`py-2.5 rounded-xl border font-black text-xs font-mono transition ${actualMode === 'DEMO' ? 'bg-amber-400 text-slate-950 border-amber-300' : 'bg-slate-950 text-amber-300 border-slate-700 hover:border-amber-400/50'}`}
+                >
+                  DEMO
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleChooseMode('REAL')}
+                  className={`py-2.5 rounded-xl border font-black text-xs font-mono transition ${actualMode === 'REAL' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-950 text-emerald-300 border-slate-700 hover:border-emerald-500/50'}`}
+                >
+                  REAL
+                </button>
+              </div>
 
               <div className="flex items-center gap-3 pt-2">
                 <button
@@ -152,7 +171,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
                   }}
                   className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-rose-950/40 hover:text-rose-400 border border-slate-700 text-slate-300 text-xs font-bold font-mono flex items-center justify-center gap-2"
                 >
-                  <LogOut className="w-4 h-4" /> Disconnect
+                  <LogOut className="w-4 h-4" /> Sign out
                 </button>
                 <button type="button" onClick={onClose} className="flex-1 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black font-mono flex items-center justify-center gap-2">
                   Continue <ArrowRight className="w-4 h-4" />
@@ -161,25 +180,44 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
             </div>
           ) : (
             <div className="space-y-3">
-              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-b from-slate-950 to-slate-900 border border-emerald-500/40 space-y-3">
-                <h4 className="text-sm font-black text-white font-mono">Official Deriv Login</h4>
-                <p className="text-[11px] text-slate-400">Authorize a real or virtual Deriv account. No account number or balance is fabricated locally.</p>
-                <button
-                  type="button"
-                  onClick={handleConnectDerivOAuth}
-                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-sm font-mono flex items-center justify-center gap-2"
-                >
-                  Connect with Deriv <ExternalLink className="w-4 h-4" />
-                </button>
+              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-b from-slate-950 to-slate-900 border border-slate-800 space-y-4">
+                <div>
+                  <h4 className="text-sm font-black text-white font-mono">Select trading account</h4>
+                  <p className="text-[11px] text-slate-400 mt-1">Both choices use your genuine Deriv account and Deriv balance. No account number or balance is created locally.</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handleChooseMode('DEMO')}
+                    className="p-4 rounded-2xl bg-amber-400/10 hover:bg-amber-400/15 border border-amber-400/40 text-left transition"
+                  >
+                    <div className="text-xs font-black font-mono text-amber-300">DEMO</div>
+                    <div className="text-[10px] text-slate-400 mt-1">Deriv virtual account</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleChooseMode('REAL')}
+                    className="p-4 rounded-2xl bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/40 text-left transition"
+                  >
+                    <div className="text-xs font-black font-mono text-emerald-300">REAL</div>
+                    <div className="text-[10px] text-slate-400 mt-1">Deriv real-money account</div>
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex gap-2.5 text-[11px] text-emerald-200">
+                <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>The selected account is verified by Deriv before any balance or contract action is enabled.</span>
               </div>
 
               <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex gap-2.5 text-[11px] text-amber-200">
                 <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>A Deriv virtual account is also a real authorized Deriv account. The app no longer creates a fake $10,000 demo account or fake login ID.</span>
+                <span>DEMO is a real Deriv virtual account. REAL uses actual funds. The app does not fabricate either balance.</span>
               </div>
 
               <button type="button" onClick={() => setShowManualToken(!showManualToken)} className="w-full flex items-center justify-between text-[11px] text-slate-500 hover:text-slate-300 font-mono py-1">
-                <span>Advanced: authorize with API token</span>
+                <span>Advanced: use Deriv API token</span>
                 {showManualToken ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
               </button>
 
