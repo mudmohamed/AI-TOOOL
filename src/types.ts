@@ -18,8 +18,8 @@ export interface DigitStat {
   digit: number;
   count: number;
   percentage: number;
-  deviation: number; // percentage difference from theoretical 10.0%
-  delay: number; // ticks elapsed since this digit last appeared
+  deviation: number; // percentage-point difference from the 10% uniform baseline
+  delay: number;
   maxStreak: number;
   isHot: boolean;
   isCold: boolean;
@@ -29,6 +29,7 @@ export interface MarketAnalysis {
   symbol: string;
   displayName: string;
   currentPrice: number;
+  pip: number;
   lastDigit: number;
   priceChange: number;
   priceChangePct: number;
@@ -41,22 +42,20 @@ export interface MarketAnalysis {
   bollingerUpper: number;
   bollingerLower: number;
   bollingerBandwidth: number;
-  
-  // Digit analysis
   digitStats: DigitStat[];
   hotDigit: number;
   coldDigit: number;
   evenPct: number;
   oddPct: number;
-  overPct: number; // 5-9
-  underPct: number; // 0-4
+  overPct: number;
+  underPct: number;
   consecutiveMatches: number;
-  
-  // Strongest to win signal
-  winScore: number; // 0 - 100
+  // Compatibility field: a 0-100 evidence/ranking score, not a predicted win rate.
+  winScore: number;
   recommendedContract: 'MATCHES' | 'DIFFERS' | 'OVER' | 'UNDER' | 'RISE' | 'FALL';
   recommendedTarget: number | string;
-  signalConfidence: number; // percentage
+  // Same evidence score kept for components that use the older field name.
+  signalConfidence: number;
   rationale: string;
 }
 
@@ -84,15 +83,18 @@ export interface TradeRecord {
   exitPrice?: number;
   exitDigit?: number;
   stake: number;
+  // Gross payout multiplier when Deriv supplies one; 0 while awaiting a proposal.
   payout: number;
   status: 'PENDING' | 'WON' | 'LOST';
+  // Actual settled profit from Deriv for completed contracts.
   profit: number;
   recoveryStep: number;
 }
 
 export interface RiskConfig {
   baseStake: number;
-  payoutRate: number; // e.g. 9.5 for matches (950%), 0.95 for rise/fall (95%), 0.10 for differs (10%)
+  // Planning estimate only. Live orders use the current Deriv proposal price/payout.
+  payoutRate: number;
   recoveryStrategy: RecoveryStrategy;
   takeProfit: number;
   stopLoss: number;
@@ -100,13 +102,12 @@ export interface RiskConfig {
   contractType: 'MATCHES' | 'DIFFERS' | 'OVER' | 'UNDER' | 'RISE' | 'FALL';
   autoNextTrade?: boolean;
   profitLockEnabled?: boolean;
-  profitLockTarget?: number; // Predefined daily profit target ($) to stop bot and pause recovery
+  profitLockTarget?: number;
 }
 
 export interface DerivAccountInfo {
   isAuthorized: boolean;
   appId: string;
-  token?: string;
   loginId?: string;
   email?: string;
   currency?: string;
@@ -135,7 +136,8 @@ export interface AutoMatchesSignal {
   symbol: string;
   displayName: string;
   targetDigit: number;
-  probabilityScore: number; // 0 - 100
+  // Weighted percentage measured from observed data, not a guaranteed probability.
+  probabilityScore: number;
   historicalFrequency: number;
   recentClusterCount: number;
   delayTicks: number;
@@ -145,7 +147,7 @@ export interface AutoMatchesSignal {
 }
 
 export interface DeepScanSettings {
-  depth: number; // 500, 1000, 1500, 2000 ticks
+  depth: number;
   autoDeepScan: boolean;
   autoMatchesEngine: boolean;
   recoveryMode: 'X2_SUPER_RECOVERY' | 'X4_SUPER_RECOVERY';
@@ -167,28 +169,28 @@ export type BulkStrategyType =
   | 'MATCHES_SNIPER_WAVE';
 
 export interface AutoMatchesConfig {
-  market?: string; // Default '1HZ10V' (Volatility 10 (1s) Index)
-  stake: number; // Initial Amount (e.g. 0.35 USD)
-  winAmount?: number; // Win Amount (resets to initial amount, e.g. 0.35 USD)
-  expectedProfit?: number; // Expected Profit target ($20.00)
-  maxAcceptableLoss?: number; // Max Acceptable Loss ($50.00)
+  market?: string;
+  stake: number;
+  winAmount?: number;
+  expectedProfit?: number;
+  maxAcceptableLoss?: number;
   nextTradeCondition?: 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';
-  martingaleFactor?: number; // e.g. 1.15
-  restartOnError?: boolean; // RESTARTONERROR: TRUE
+  martingaleFactor?: number;
+  restartOnError?: boolean;
   executionSpeed: 'FAST' | 'NORMAL';
   targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM';
   customTargetDigit?: number;
 }
 
 export interface DBotXmlDefinition {
-  symbol: string; // '1HZ10V'
-  market: string; // 'synthetic_index'
-  submarket: string; // 'random_index'
-  tradeType: string; // 'matchesdiffers'
-  contractType: string; // 'DIGITMATCH'
-  candleInterval: number; // 60
-  timeMachineEnabled: boolean; // false
-  restartOnError: boolean; // true
+  symbol: string;
+  market: string;
+  submarket: string;
+  tradeType: string;
+  contractType: string;
+  candleInterval: number;
+  timeMachineEnabled: boolean;
+  restartOnError: boolean;
   initialAmount: number;
   winAmount: number;
   expectedProfit: number;
@@ -197,7 +199,7 @@ export interface DBotXmlDefinition {
 }
 
 export interface BulkTradeConfig {
-  simultaneousTrades: number; // 2, 3, 5, 8
+  simultaneousTrades: number;
   stakePerTrade: number;
   strategy: BulkStrategyType;
   autoRepeatCycle: boolean;
