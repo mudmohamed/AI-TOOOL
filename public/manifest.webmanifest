@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Deriv Matrix & Super Recovery Engine",
+  "name": "Deriv Market Matrix & Recovery Engine",
   "short_name": "Deriv Matrix",
-  "description": "Professional 100% Real Deriv WebSocket Trading Terminal with Super Recovery, Auto-Matches, and Cashier",
+  "description": "Deriv WebSocket market analysis and authenticated proposal, buy, balance, and settlement monitoring with configurable recovery controls.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
@@ -10,30 +10,10 @@
   "theme_color": "#020617",
   "orientation": "any",
   "icons": [
-    {
-      "src": "/pwa-192x192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/pwa-512x512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/pwa-maskable-512x512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
-    },
-    {
-      "src": "/icon.svg",
-      "sizes": "192x192 512x512",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
-    }
+    { "src": "/pwa-192x192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/pwa-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/pwa-maskable-512x512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon.svg", "sizes": "192x192 512x512", "type": "image/svg+xml", "purpose": "any maskable" }
   ],
   "categories": ["finance", "productivity", "utilities"]
 }
