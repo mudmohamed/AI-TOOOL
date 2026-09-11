@@ -174,12 +174,15 @@ class DerivWebSocketService {
 
     return new Promise<boolean>((resolve) => {
       let settled = false;
+      let closedWatcher: ReturnType<typeof setInterval> | null = null;
+      let timeout: ReturnType<typeof setTimeout> | null = null;
+
       const finish = (ok: boolean) => {
         if (settled) return;
         settled = true;
         window.removeEventListener('message', onMessage);
-        clearInterval(closedWatcher);
-        clearTimeout(timeout);
+        if (closedWatcher) clearInterval(closedWatcher);
+        if (timeout) clearTimeout(timeout);
         try { if (!popup.closed) popup.close(); } catch {}
         resolve(ok);
       };
@@ -208,11 +211,11 @@ class DerivWebSocketService {
 
       window.addEventListener('message', onMessage);
 
-      const closedWatcher = setInterval(() => {
+      closedWatcher = setInterval(() => {
         if (!settled && popup.closed) finish(false);
       }, 500);
 
-      const timeout = setTimeout(() => {
+      timeout = setTimeout(() => {
         this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv account authorization timed out. Please try again.' });
         finish(false);
       }, 180000);
@@ -266,6 +269,7 @@ class DerivWebSocketService {
         const reqId = Number(data.req_id);
 
         if (data.error) {
+          const wasProposal = this.proposalRequests.has(reqId);
           const clientTradeId = this.proposalRequests.get(reqId) || this.buyRequests.get(reqId);
           if (clientTradeId) {
             this.proposalRequests.delete(reqId);
@@ -273,7 +277,7 @@ class DerivWebSocketService {
             this.notifyHandlers({
               msg_type: 'trade_error',
               clientTradeId,
-              stage: this.proposalRequests.has(reqId) ? 'proposal' : 'buy',
+              stage: wasProposal ? 'proposal' : 'buy',
               error: data.error.message || 'Trade request rejected by Deriv',
               code: data.error.code,
             });
