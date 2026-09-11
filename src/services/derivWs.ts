@@ -1,7 +1,6 @@
 import { DerivAccountInfo } from '../types';
 
 type MessageHandler = (data: any) => void;
-
 type AccountMode = 'DEMO' | 'REAL';
 
 export interface PlaceContractParams {
@@ -14,12 +13,40 @@ export interface PlaceContractParams {
   barrier?: string | number;
 }
 
+type TradeRequestMeta = {
+  clientTradeId: string;
+  contractType: string;
+  symbol: string;
+  amount: number;
+  barrier?: string;
+  managedMatches: boolean;
+  recoveryStep: number;
+};
+
+type MatchesRecoveryState = {
+  baseStake: number;
+  recoveryStep: number;
+  multiplier: number;
+  maxSteps: number;
+  halted: boolean;
+  lastTradeTick: number;
+};
+
 class DerivWebSocketService {
   private ws: WebSocket | null = null;
   private accountWs: WebSocket | null = null;
-  private readonly publicUrl = 'wss://api.derivws.com/trading/v1/options/ws/public';
+
+  // Current Deriv public Options WebSocket first. Legacy public WebSocket is a real-data fallback only.
+  private readonly publicEndpoints = [
+    'wss://api.derivws.com/trading/v1/options/ws/public',
+    'wss://ws.binaryws.com/websockets/v3',
+  ];
+  private publicEndpointIndex = 0;
+
+  // Secure account bridge uses Deriv OAuth/PAT -> OTP server-side and returns a ready authenticated WS URL.
   private readonly bridgeUrl = 'https://fasterpro-analyzer.vercel.app/matrix-bridge.html';
   private readonly bridgeOrigin = 'https://fasterpro-analyzer.vercel.app';
+
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private messageHandlers = new Set<MessageHandler>();
@@ -27,11 +54,14 @@ class DerivWebSocketService {
   private latency = 0;
   private lastPingTime = 0;
   private subscribedSymbols = new Set<string>();
-  private proposalMeta = new Map<string, any>();
-  private privateReqId = 1000;
-  private proposalRequests = new Map<number, string>();
-  private buyRequests = new Map<number, string>();
   private intentionalAccountClose = false;
+  private privateReqId = 1000;
+
+  private proposalRequests = new Map<number, TradeRequestMeta>();
+  private buyRequests = new Map<number, TradeRequestMeta>();
+  private proposalMeta = new Map<string, any>();
+  private openContracts = new Map<string, TradeRequestMeta>();
+
   private accountInfo: DerivAccountInfo = {
     isAuthorized: false,
     appId: 'oauth2',
@@ -56,6 +86,15 @@ class DerivWebSocketService {
 
   private symbolCurrentPrices = new Map<string, number>();
 
+  // Real-tick-only statistics used by the original winning Matches engine.
+  private digitSeries = new Map<string, number[]>();
+  private digitCounts = new Map<string, number[]>();
+  private transitionMatrices = new Map<string, number[][]>();
+  private liveTickCounts = new Map<string, number>();
+
+  // Exact first real engine behaviour: fresh Markov digit each order, 2.1x recovery, max 5 steps.
+  private matchesRecovery = new Map<string, MatchesRecoveryState>();
+
   constructor() {
     this.connect();
   }
@@ -65,16 +104,139 @@ class DerivWebSocketService {
     return this.privateReqId;
   }
 
-  public connect(): void {
-    if (
-      this.ws &&
-      (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)
-    ) {
-      return;
+  private emptyMatrix(): number[][] {
+    return Array.from({ length: 10 }, () => Array(10).fill(0));
+  }
+
+  private getRecoveryState(symbol: string): MatchesRecoveryState {
+    let state = this.matchesRecovery.get(symbol);
+    if (!state) {
+      state = {
+        baseStake: 0,
+        recoveryStep: 0,
+        multiplier: 2.1,
+        maxSteps: 5,
+        halted: false,
+        lastTradeTick: -999999,
+      };
+      this.matchesRecovery.set(symbol, state);
+    }
+    return state;
+  }
+
+  private resetAllMatchesRecovery(): void {
+    this.matchesRecovery.clear();
+  }
+
+  private resetSymbolStats(symbol: string): void {
+    this.digitSeries.set(symbol, []);
+    this.digitCounts.set(symbol, Array(10).fill(0));
+    this.transitionMatrices.set(symbol, this.emptyMatrix());
+  }
+
+  private observePrice(symbol: string, quote: number, pipSize?: number): void {
+    if (!Number.isFinite(quote) || !symbol) return;
+    if (Number.isFinite(pipSize)) this.symbolPipSizes.set(symbol, Number(pipSize));
+    this.symbolCurrentPrices.set(symbol, quote);
+
+    const digit = this.extractLastDigit(quote, symbol);
+    const digits = this.digitSeries.get(symbol) || [];
+    const counts = this.digitCounts.get(symbol) || Array(10).fill(0);
+    const matrix = this.transitionMatrices.get(symbol) || this.emptyMatrix();
+    const previous = digits.length ? digits[digits.length - 1] : digit;
+
+    digits.push(digit);
+    if (digits.length > 5000) {
+      // Rebuild from the retained real sample so counts/matrix never drift after trimming.
+      const retained = digits.slice(-3000);
+      this.digitSeries.set(symbol, retained);
+      const rebuiltCounts = Array(10).fill(0);
+      const rebuiltMatrix = this.emptyMatrix();
+      retained.forEach((d) => { if (d >= 0 && d <= 9) rebuiltCounts[d] += 1; });
+      for (let i = 0; i < retained.length - 1; i += 1) {
+        const from = retained[i];
+        const to = retained[i + 1];
+        if (from >= 0 && from <= 9 && to >= 0 && to <= 9) rebuiltMatrix[from][to] += 1;
+      }
+      this.digitCounts.set(symbol, rebuiltCounts);
+      this.transitionMatrices.set(symbol, rebuiltMatrix);
+    } else {
+      counts[digit] += 1;
+      matrix[previous][digit] += 1;
+      this.digitSeries.set(symbol, digits);
+      this.digitCounts.set(symbol, counts);
+      this.transitionMatrices.set(symbol, matrix);
+    }
+  }
+
+  private loadHistoryIntoStats(symbol: string, prices: number[], pipSize?: number): void {
+    if (Number.isFinite(pipSize)) this.symbolPipSizes.set(symbol, Number(pipSize));
+    this.resetSymbolStats(symbol);
+    for (const raw of prices) {
+      const quote = Number(raw);
+      if (Number.isFinite(quote)) this.observePrice(symbol, quote, pipSize);
+    }
+  }
+
+  private hottestDigit(symbol: string): number {
+    const counts = this.digitCounts.get(symbol) || Array(10).fill(0);
+    let best = 0;
+    for (let digit = 1; digit < 10; digit += 1) {
+      if ((counts[digit] || 0) > (counts[best] || 0)) best = digit;
+    }
+    return best;
+  }
+
+  // Same target selection as the first real adapter the user supplied:
+  // from the current last digit, choose the most-observed next digit; if the row is empty, use hottest digit.
+  private markovDigit(symbol: string, fallbackBarrier?: string | number): number {
+    const digits = this.digitSeries.get(symbol) || [];
+    const matrix = this.transitionMatrices.get(symbol) || this.emptyMatrix();
+    if (digits.length < 2) {
+      const fallback = Number(fallbackBarrier);
+      return Number.isInteger(fallback) && fallback >= 0 && fallback <= 9 ? fallback : this.hottestDigit(symbol);
     }
 
+    const last = digits[digits.length - 1];
+    const row = matrix[last] || Array(10).fill(0);
+    let best = 0;
+    for (let digit = 1; digit < 10; digit += 1) {
+      if ((row[digit] || 0) > (row[best] || 0)) best = digit;
+    }
+
+    if ((row[best] || 0) === 0) return this.hottestDigit(symbol);
+    return best;
+  }
+
+  private handlePublicData(data: any): void {
+    const tick = data?.tick || data?.data?.tick;
+    const history = data?.history || data?.data?.history;
+
+    if (tick?.symbol && tick.quote !== undefined) {
+      const quote = Number(tick.quote);
+      const pip = Number(tick.pip_size ?? this.symbolPipSizes.get(tick.symbol) ?? 2);
+      if (Number.isFinite(quote)) {
+        this.observePrice(tick.symbol, quote, pip);
+        this.liveTickCounts.set(tick.symbol, (this.liveTickCounts.get(tick.symbol) || 0) + 1);
+      }
+    }
+
+    if (history && Array.isArray(history.prices)) {
+      const symbol = data?.echo_req?.ticks_history || data?.data?.echo_req?.ticks_history;
+      if (symbol) {
+        const prices = history.prices.map(Number).filter(Number.isFinite);
+        const pip = Number(data?.pip_size ?? data?.data?.pip_size ?? this.symbolPipSizes.get(symbol) ?? 2);
+        this.loadHistoryIntoStats(symbol, prices, pip);
+      }
+    }
+  }
+
+  public connect(): void {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+
+    const endpoint = this.publicEndpoints[this.publicEndpointIndex % this.publicEndpoints.length];
     try {
-      const ws = new WebSocket(this.publicUrl);
+      const ws = new WebSocket(endpoint);
       this.ws = ws;
 
       ws.onopen = () => {
@@ -88,6 +250,7 @@ class DerivWebSocketService {
         if (this.ws !== ws) return;
         try {
           const data = JSON.parse(event.data);
+          const err = data?.error || data?.errors?.[0];
 
           if (data.msg_type === 'ping') {
             this.latency = this.lastPingTime ? Date.now() - this.lastPingTime : 0;
@@ -95,27 +258,17 @@ class DerivWebSocketService {
             return;
           }
 
-          if (data.error) {
+          if (err) {
             this.notifyHandlers({
               msg_type: 'deriv_error',
-              error: data.error.message || 'Deriv market-data error',
-              code: data.error.code,
+              error: err.message || 'Deriv market-data error',
+              code: err.code,
               orig_msg_type: data.msg_type,
               echo_req: data.echo_req,
             });
           }
 
-          if (data.tick?.pip_size !== undefined && data.tick?.symbol) {
-            this.symbolPipSizes.set(data.tick.symbol, Number(data.tick.pip_size));
-          }
-
-          if (data.msg_type === 'tick' && data.tick) {
-            const quote = Number(data.tick.quote);
-            if (data.tick.symbol && Number.isFinite(quote)) {
-              this.symbolCurrentPrices.set(data.tick.symbol, quote);
-            }
-          }
-
+          this.handlePublicData(data);
           this.notifyHandlers(data);
         } catch (error) {
           console.error('Error parsing Deriv public WebSocket message:', error);
@@ -135,12 +288,13 @@ class DerivWebSocketService {
         this.isConnected = false;
         this.stopHeartbeat();
         this.notifyHandlers({ msg_type: 'connection_status', connected: false });
+        this.publicEndpointIndex = (this.publicEndpointIndex + 1) % this.publicEndpoints.length;
 
         if (!this.reconnectTimeout) {
           this.reconnectTimeout = setTimeout(() => {
             this.reconnectTimeout = null;
             this.connect();
-          }, 2500);
+          }, 2000);
         }
       };
     } catch (error) {
@@ -210,11 +364,7 @@ class DerivWebSocketService {
       };
 
       window.addEventListener('message', onMessage);
-
-      closedWatcher = setInterval(() => {
-        if (!settled && popup.closed) finish(false);
-      }, 500);
-
+      closedWatcher = setInterval(() => { if (!settled && popup.closed) finish(false); }, 500);
       timeout = setTimeout(() => {
         this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv account authorization timed out. Please try again.' });
         finish(false);
@@ -238,6 +388,7 @@ class DerivWebSocketService {
       isVirtual,
       accountsList,
     };
+    this.resetAllMatchesRecovery();
     this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
     this.openAccountSocket(wsUrl);
   }
@@ -267,54 +418,69 @@ class DerivWebSocketService {
       try {
         const data = JSON.parse(event.data);
         const reqId = Number(data.req_id);
+        const error = data?.error || data?.errors?.[0];
+        const msgType = data.msg_type || data?.data?.msg_type;
+        const balance = data.balance || data?.data?.balance;
+        const proposal = data.proposal || data?.data?.proposal;
+        const buy = data.buy || data?.data?.buy;
+        const contract = data.proposal_open_contract || data?.data?.proposal_open_contract;
 
-        if (data.error) {
-          const wasProposal = this.proposalRequests.has(reqId);
-          const clientTradeId = this.proposalRequests.get(reqId) || this.buyRequests.get(reqId);
-          if (clientTradeId) {
+        if (error) {
+          const proposalMeta = this.proposalRequests.get(reqId);
+          const buyMeta = this.buyRequests.get(reqId);
+          const meta = proposalMeta || buyMeta;
+          if (meta) {
             this.proposalRequests.delete(reqId);
             this.buyRequests.delete(reqId);
             this.notifyHandlers({
               msg_type: 'trade_error',
-              clientTradeId,
-              stage: wasProposal ? 'proposal' : 'buy',
-              error: data.error.message || 'Trade request rejected by Deriv',
-              code: data.error.code,
+              clientTradeId: meta.clientTradeId,
+              stage: proposalMeta ? 'proposal' : 'buy',
+              error: error.message || 'Trade request rejected by Deriv',
+              code: error.code,
             });
           } else {
             this.notifyHandlers({
               msg_type: 'deriv_error',
-              error: data.error.message || 'Deriv account error',
-              code: data.error.code,
-              orig_msg_type: data.msg_type,
+              error: error.message || 'Deriv account error',
+              code: error.code,
+              orig_msg_type: msgType,
             });
           }
           return;
         }
 
-        if (data.msg_type === 'balance' && data.balance) {
+        if ((msgType === 'balance' || balance) && balance) {
+          const nextBalance = Number(balance.balance ?? balance);
           this.accountInfo = {
             ...this.accountInfo,
             isAuthorized: true,
-            balance: Number(data.balance.balance || 0),
-            currency: data.balance.currency || this.accountInfo.currency,
+            balance: Number.isFinite(nextBalance) ? nextBalance : this.accountInfo.balance,
+            currency: balance.currency || this.accountInfo.currency,
           };
           this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
           return;
         }
 
-        if (data.msg_type === 'proposal' && data.proposal) {
-          const clientTradeId = this.proposalRequests.get(reqId);
-          if (!clientTradeId) return;
+        if ((msgType === 'proposal' || proposal) && proposal) {
+          const meta = this.proposalRequests.get(reqId);
+          if (!meta) return;
           this.proposalRequests.delete(reqId);
-          this.proposalMeta.set(clientTradeId, data.proposal);
-          this.notifyHandlers({ msg_type: 'proposal_success', clientTradeId, proposal: data.proposal });
+          this.proposalMeta.set(meta.clientTradeId, proposal);
+          this.notifyHandlers({
+            msg_type: 'proposal_success',
+            clientTradeId: meta.clientTradeId,
+            proposal,
+            effectiveBarrier: meta.barrier,
+            effectiveAmount: meta.amount,
+            recoveryStep: meta.recoveryStep,
+          });
 
-          const askPrice = Number(data.proposal.ask_price);
-          if (!data.proposal.id || !Number.isFinite(askPrice) || askPrice <= 0) {
+          const askPrice = Number(proposal.ask_price);
+          if (!proposal.id || !Number.isFinite(askPrice) || askPrice <= 0) {
             this.notifyHandlers({
               msg_type: 'trade_error',
-              clientTradeId,
+              clientTradeId: meta.clientTradeId,
               stage: 'proposal',
               error: 'Deriv returned an invalid proposal.',
             });
@@ -322,23 +488,37 @@ class DerivWebSocketService {
           }
 
           const buyReqId = this.nextPrivateReqId();
-          this.buyRequests.set(buyReqId, clientTradeId);
-          this.sendAccount({ buy: data.proposal.id, price: askPrice, req_id: buyReqId });
+          this.buyRequests.set(buyReqId, meta);
+          this.sendAccount({ buy: proposal.id, price: askPrice, req_id: buyReqId });
           return;
         }
 
-        if (data.msg_type === 'buy' && data.buy) {
-          const clientTradeId = this.buyRequests.get(reqId);
-          if (!clientTradeId) return;
+        if ((msgType === 'buy' || buy) && buy) {
+          const meta = this.buyRequests.get(reqId);
+          if (!meta) return;
           this.buyRequests.delete(reqId);
-          const proposal = this.proposalMeta.get(clientTradeId);
-          this.proposalMeta.delete(clientTradeId);
-          this.notifyHandlers({ msg_type: 'buy_success', clientTradeId, buy: data.buy, proposal });
+          const proposalForTrade = this.proposalMeta.get(meta.clientTradeId);
+          this.proposalMeta.delete(meta.clientTradeId);
 
-          if (data.buy.contract_id !== undefined) {
+          const contractId = buy.contract_id;
+          if (contractId !== undefined && contractId !== null) {
+            this.openContracts.set(String(contractId), meta);
+          }
+
+          this.notifyHandlers({
+            msg_type: 'buy_success',
+            clientTradeId: meta.clientTradeId,
+            buy,
+            proposal: proposalForTrade,
+            effectiveBarrier: meta.barrier,
+            effectiveAmount: meta.amount,
+            recoveryStep: meta.recoveryStep,
+          });
+
+          if (contractId !== undefined) {
             this.sendAccount({
               proposal_open_contract: 1,
-              contract_id: data.buy.contract_id,
+              contract_id: contractId,
               subscribe: 1,
               req_id: this.nextPrivateReqId(),
             });
@@ -346,8 +526,9 @@ class DerivWebSocketService {
           return;
         }
 
-        if (data.msg_type === 'proposal_open_contract' && data.proposal_open_contract) {
-          this.notifyHandlers({ msg_type: 'contract_update', contract: data.proposal_open_contract });
+        if ((msgType === 'proposal_open_contract' || contract) && contract) {
+          this.updateManagedMatchesFromSettlement(contract);
+          this.notifyHandlers({ msg_type: 'contract_update', contract });
           return;
         }
 
@@ -369,12 +550,56 @@ class DerivWebSocketService {
       this.proposalRequests.clear();
       this.buyRequests.clear();
       this.proposalMeta.clear();
+      this.openContracts.clear();
       this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
       if (!this.intentionalAccountClose) {
         this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
         this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
       }
     };
+  }
+
+  private updateManagedMatchesFromSettlement(contract: any): void {
+    const contractId = String(contract?.contract_id ?? '');
+    const meta = this.openContracts.get(contractId);
+    if (!meta) return;
+
+    const status = String(contract?.status || '').toLowerCase();
+    const settled = Boolean(contract?.is_sold || contract?.is_expired || ['won', 'lost', 'sold', 'expired'].includes(status));
+    if (!settled) return;
+
+    this.openContracts.delete(contractId);
+    if (!meta.managedMatches) return;
+
+    const state = this.getRecoveryState(meta.symbol);
+    const profit = Number(contract?.profit ?? 0);
+    const won = status === 'won' || profit > 0;
+
+    if (won) {
+      state.recoveryStep = 0;
+      state.halted = false;
+      state.baseStake = 0;
+      this.notifyHandlers({
+        msg_type: 'matches_recovery_update',
+        symbol: meta.symbol,
+        won: true,
+        recoveryStep: 0,
+        halted: false,
+        profit,
+      });
+      return;
+    }
+
+    state.recoveryStep += 1;
+    if (state.recoveryStep >= state.maxSteps) state.halted = true;
+    this.notifyHandlers({
+      msg_type: 'matches_recovery_update',
+      symbol: meta.symbol,
+      won: false,
+      recoveryStep: state.recoveryStep,
+      halted: state.halted,
+      profit,
+    });
   }
 
   public switchAccount(loginId: string): void {
@@ -412,6 +637,8 @@ class DerivWebSocketService {
     this.proposalRequests.clear();
     this.buyRequests.clear();
     this.proposalMeta.clear();
+    this.openContracts.clear();
+    this.resetAllMatchesRecovery();
     this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
     this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
     this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
@@ -462,8 +689,8 @@ class DerivWebSocketService {
   public extractLastDigit(quote: number, symbol: string): number {
     if (!Number.isFinite(quote)) return 0;
     const pip = this.getPipSize(symbol);
-    const quoteStr = Number(quote).toFixed(pip);
-    const digit = Number.parseInt(quoteStr.charAt(quoteStr.length - 1), 10);
+    const text = Number(quote).toFixed(pip);
+    const digit = Number.parseInt(text.charAt(text.length - 1), 10);
     return Number.isNaN(digit) ? 0 : digit;
   }
 
@@ -494,7 +721,7 @@ class DerivWebSocketService {
       return false;
     }
 
-    const amount = Number(params.amount);
+    let amount = Number(params.amount);
     if (!Number.isFinite(amount) || amount <= 0) {
       this.notifyHandlers({
         msg_type: 'trade_error',
@@ -505,8 +732,64 @@ class DerivWebSocketService {
       return false;
     }
 
+    let barrier = params.barrier !== undefined && params.barrier !== '' ? String(params.barrier) : undefined;
+    let managedMatches = false;
+    let recoveryStep = 0;
+
+    if (params.contract_type === 'DIGITMATCH') {
+      managedMatches = true;
+      const state = this.getRecoveryState(params.symbol);
+      const currentTick = this.liveTickCounts.get(params.symbol) || 0;
+
+      // The original real engine trades only every third real tick while idle.
+      if (currentTick - state.lastTradeTick < 3) return false;
+
+      if (state.halted) {
+        this.notifyHandlers({
+          msg_type: 'trade_error',
+          clientTradeId: params.clientTradeId,
+          stage: 'risk',
+          error: `Matches recovery stopped after ${state.maxSteps} consecutive losing steps. Switch account or reload to start a new bounded sequence.`,
+        });
+        return false;
+      }
+
+      if (state.recoveryStep === 0 || state.baseStake <= 0) {
+        state.baseStake = amount;
+      }
+
+      recoveryStep = state.recoveryStep;
+      amount = Number((state.baseStake * Math.pow(state.multiplier, recoveryStep)).toFixed(2));
+      amount = Math.max(0.35, amount);
+      barrier = String(this.markovDigit(params.symbol, params.barrier));
+
+      const balance = Number(this.accountInfo.balance ?? 0);
+      if (Number.isFinite(balance) && balance > 0 && amount > balance) {
+        state.halted = true;
+        this.notifyHandlers({
+          msg_type: 'trade_error',
+          clientTradeId: params.clientTradeId,
+          stage: 'risk',
+          error: `Recovery stake ${amount.toFixed(2)} exceeds the available Deriv balance. Matches engine stopped before sending the order.`,
+        });
+        return false;
+      }
+
+      state.lastTradeTick = currentTick;
+    }
+
+    const meta: TradeRequestMeta = {
+      clientTradeId: params.clientTradeId,
+      contractType: params.contract_type,
+      symbol: params.symbol,
+      amount,
+      barrier,
+      managedMatches,
+      recoveryStep,
+    };
+
     const reqId = this.nextPrivateReqId();
-    this.proposalRequests.set(reqId, params.clientTradeId);
+    this.proposalRequests.set(reqId, meta);
 
     const proposalRequest: any = {
       proposal: 1,
@@ -520,9 +803,7 @@ class DerivWebSocketService {
       req_id: reqId,
     };
 
-    if (params.barrier !== undefined && params.barrier !== '') {
-      proposalRequest.barrier = String(params.barrier);
-    }
+    if (barrier !== undefined && barrier !== '') proposalRequest.barrier = barrier;
 
     const sent = this.sendAccount(proposalRequest);
     if (!sent) this.proposalRequests.delete(reqId);
@@ -535,15 +816,12 @@ class DerivWebSocketService {
   }
 
   public subscribeTicks(symbol: string): void {
-    this.subscribedSymbols.clear();
     this.subscribedSymbols.add(symbol);
-    this.send({ forget_all: 'ticks' });
     this.send({ ticks: symbol, subscribe: 1 });
   }
 
   public subscribeTick(symbol: string): void {
-    this.subscribedSymbols.add(symbol);
-    this.send({ ticks: symbol, subscribe: 1 });
+    this.subscribeTicks(symbol);
   }
 
   public subscribeMultipleTicks(symbols: string[]): void {
@@ -556,14 +834,14 @@ class DerivWebSocketService {
     this.send({
       ticks_history: symbol,
       end: 'latest',
-      count,
+      count: Math.max(1, Math.min(5000, Number(count) || 500)),
       style: 'ticks',
       adjust_start_time: 1,
     });
   }
 
   public requestActiveSymbols(): void {
-    this.send({ active_symbols: 'brief', product_type: 'basic' });
+    this.send({ active_symbols: 'brief' });
   }
 
   public addListener(handler: MessageHandler): () => void {
@@ -572,9 +850,7 @@ class DerivWebSocketService {
       try {
         handler({ msg_type: 'connection_status', connected: this.isConnected });
         handler({ msg_type: 'latency_update', latency: this.latency });
-        if (this.accountInfo.isAuthorized) {
-          handler({ msg_type: 'account_update', account: this.accountInfo });
-        }
+        if (this.accountInfo.isAuthorized) handler({ msg_type: 'account_update', account: this.accountInfo });
       } catch (error) {
         console.error('Error in initial listener dispatch:', error);
       }
