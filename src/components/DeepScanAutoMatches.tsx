@@ -4,29 +4,19 @@
  */
 
 import React, { useState } from 'react';
-import { MarketAnalysis, AutoMatchesSignal, TradeRecord, AutoMatchesConfig } from '../types';
+import { AutoMatchesConfig, AutoMatchesSignal, MarketAnalysis, TradeRecord } from '../types';
+import { findBestAutoMatchesTarget } from '../utils/autoMatchesEngine';
 import {
-  findBestAutoMatchesTarget,
-  calculateSameLosingPriceRecovery,
-} from '../utils/autoMatchesEngine';
-import { DerivStatementReceipts } from './DerivStatementReceipts';
-import {
-  Zap,
-  Target,
-  ShieldCheck,
-  Play,
-  Square,
-  CheckCircle2,
-  AlertTriangle,
-  ChevronRight,
-  TrendingUp,
-  RefreshCw,
-  Code2,
-  DollarSign,
   Activity,
-  Layers,
-  ArrowRight,
-  Sparkles,
+  AlertTriangle,
+  CheckCircle2,
+  Code2,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+  Square,
+  Target,
+  Zap,
 } from 'lucide-react';
 
 interface DeepScanAutoMatchesProps {
@@ -85,655 +75,178 @@ export const DeepScanAutoMatches: React.FC<DeepScanAutoMatchesProps> = ({
   baseStake,
   onSimulateTrade,
   sessionStats,
-  tradeHistory = [],
-  onClearHistory,
   autoMatchesConfig,
   onAutoMatchesConfigChange,
   accountMode = 'REAL',
-  currentBalance,
+  currentBalance = 0,
   onOpenCashier,
 }) => {
-  const [internalConfig, setInternalConfig] = useState<AutoMatchesConfig>(() => {
-    try {
-      const saved = localStorage.getItem('deriv_auto_matches_config');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {
-      market: '1HZ10V',
-      stake: 0.35, // Initial Amount
-      winAmount: 0.35, // Win Amount
-      expectedProfit: 20.0, // Expected Profit
-      maxAcceptableLoss: 50.0, // Max Acceptable Loss
-      nextTradeCondition: 'MARTINGALE',
-      martingaleFactor: 1.15,
-      restartOnError: true,
-      executionSpeed: 'FAST',
-      targetStrategy: 'REPEAT_ENTRY',
-    };
+  const [internalConfig, setInternalConfig] = useState<AutoMatchesConfig>({
+    market: '1HZ10V',
+    stake: 0.35,
+    winAmount: 0.35,
+    expectedProfit: 20,
+    maxAcceptableLoss: 50,
+    nextTradeCondition: 'RESET_ON_WIN',
+    martingaleFactor: 1,
+    restartOnError: true,
+    executionSpeed: 'FAST',
+    targetStrategy: 'MARKOV_TRANSITION',
   });
+  const config = autoMatchesConfig || internalConfig;
 
-  const activeConfig = autoMatchesConfig || internalConfig;
-
-  const handleConfigChange = (newConfig: AutoMatchesConfig) => {
-    if (onAutoMatchesConfigChange) {
-      onAutoMatchesConfigChange(newConfig);
-    } else {
-      setInternalConfig(newConfig);
-      try {
-        localStorage.setItem('deriv_auto_matches_config', JSON.stringify(newConfig));
-      } catch {}
-    }
+  const updateConfig = (next: AutoMatchesConfig) => {
+    if (onAutoMatchesConfigChange) onAutoMatchesConfigChange(next);
+    else setInternalConfig(next);
   };
 
-  // Generate Auto-Matches signals across all available markets
   const signals: AutoMatchesSignal[] = Object.entries(marketTicks)
-    .map(([symbol, rawData]) => {
-      const data = rawData as { prices: number[]; digits: number[] } | undefined;
+    .map(([symbol, data]) => {
       const analysis = analyses[symbol];
-      if (!analysis || !data || !data.digits || data.digits.length < 10) return null;
-      return findBestAutoMatchesTarget(
-        symbol,
-        analysis.displayName,
-        data.digits,
-        analysis.digitStats,
-        analysis.lastDigit
-      );
+      if (!analysis || !data?.digits || data.digits.length < 30) return null;
+      return findBestAutoMatchesTarget(symbol, analysis.displayName, data.digits, analysis.digitStats, analysis.lastDigit);
     })
-    .filter((s): s is AutoMatchesSignal => Boolean(s))
+    .filter((signal): signal is AutoMatchesSignal => Boolean(signal))
     .sort((a, b) => b.probabilityScore - a.probabilityScore);
 
-  const activeMarketAnalysis = analyses[currentSymbol];
-  const activeMarketTicks = marketTicks[currentSymbol];
-  const currentLastDigit = activeMarketAnalysis?.lastDigit ?? (activeMarketTicks?.digits?.slice(-1)[0] ?? 0);
+  const activeAnalysis = analyses[currentSymbol];
+  const activeTicks = marketTicks[currentSymbol];
+  const lastObservedDigit = activeAnalysis?.lastDigit ?? activeTicks?.digits?.slice(-1)[0] ?? 0;
+  const bestSignal = signals.find((signal) => signal.symbol === currentSymbol) || signals[0];
 
-  // Dynamic next stake calculation matching DBot XML logic
-  const calculateNextStake = (): number => {
-    const initialAmt = activeConfig.stake || 0.35;
-    const winAmt = activeConfig.winAmount || initialAmt;
-    const maxLoss = activeConfig.maxAcceptableLoss || 50.0;
+  const manualTarget = config.customTargetDigit !== undefined
+    ? config.customTargetDigit
+    : config.targetStrategy === 'HOTTEST_CLUSTER'
+      ? activeAnalysis?.hotDigit ?? lastObservedDigit
+      : config.targetStrategy === 'MARKOV_TRANSITION'
+        ? bestSignal?.targetDigit ?? lastObservedDigit
+        : lastObservedDigit;
 
-    if (sessionStats.consecutiveLosses <= 0) {
-      return winAmt;
-    }
-
-    if (activeConfig.nextTradeCondition === 'SAME_LOSS_RECOVERY') {
-      return Number(
-        Math.min(maxLoss, Math.max(initialAmt, (sessionStats.cumulativeLoss + winAmt) / 8.5)).toFixed(2)
-      );
-    }
-
-    if (activeConfig.nextTradeCondition === 'RESET_ON_WIN') {
-      return initialAmt;
-    }
-
-    // Default: Martingale
-    const factor = activeConfig.martingaleFactor || 1.15;
-    return Number(
-      Math.min(maxLoss, initialAmt * Math.pow(factor, sessionStats.consecutiveLosses)).toFixed(2)
-    );
-  };
-
-  const nextCalculatedStake = calculateNextStake();
-
-  const handleManualTradeNow = () => {
-    const targetDigit =
-      activeConfig.customTargetDigit !== undefined
-        ? activeConfig.customTargetDigit
-        : currentLastDigit;
-
+  const handleManualTrade = () => {
     onSimulateTrade({
       contractType: 'MATCHES',
-      targetValue: targetDigit,
-      stake: nextCalculatedStake,
+      targetValue: manualTarget,
+      stake: config.stake || baseStake || 0.35,
       symbol: currentSymbol,
-      payout: 8.342857,
-      entryDigit: currentLastDigit,
+      entryDigit: lastObservedDigit,
     });
   };
 
   return (
-    <div id="deep-scan-auto-matches" className="space-y-6">
-      {/* QUICK SYSTEM GUIDE: HOW TO TRADE 100% REAL ON DERIV */}
+    <div className="space-y-6">
       <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 sm:p-5 shadow-xl space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
-            <h3 className="text-xs sm:text-sm font-mono font-bold uppercase tracking-wider text-slate-100">
-              SYSTEM GUIDE: HOW THIS DERIV BOT TRADES (100% REAL)
-            </h3>
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <h3 className="text-xs sm:text-sm font-mono font-bold uppercase tracking-wider text-slate-100">Live Deriv Matches analysis</h3>
           </div>
-          <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-500/10 px-3 py-1 rounded-lg border border-emerald-500/30">
-            834% Contract Payout Multiplier
-          </span>
+          <span className="text-xs font-mono text-slate-400">Payout is requested live from Deriv before every buy</span>
         </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-mono">
-          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
-            <div className="text-emerald-400 font-bold flex items-center gap-2">
-              <span className="w-5 h-5 rounded-md bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[11px] font-black">
-                1
-              </span>
-              <span>100% Real Live Stream</span>
-            </div>
-            <p className="text-[11px] text-slate-400 leading-relaxed">
-              Connected to <strong>Volatility 10 (1s) Index (1HZ10V)</strong>. Every tick quote and last digit updates live directly from Deriv.
-            </p>
-          </div>
-
-          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
-            <div className="text-cyan-400 font-bold flex items-center gap-2">
-              <span className="w-5 h-5 rounded-md bg-cyan-500/20 text-cyan-400 flex items-center justify-center text-[11px] font-black">
-                2
-              </span>
-              <span>Digit Match Contract</span>
-            </div>
-            <p className="text-[11px] text-slate-400 leading-relaxed">
-              Buys <strong>DIGITMATCH</strong> (1 tick). If the exit digit matches the target digit, you win <strong>+$2.57 USD on $0.35 stake (~834% return)</strong>.
-            </p>
-          </div>
-
-          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
-            <div className="text-amber-400 font-bold flex items-center gap-2">
-              <span className="w-5 h-5 rounded-md bg-amber-500/20 text-amber-400 flex items-center justify-center text-[11px] font-black">
-                3
-              </span>
-              <span>Recovery &amp; Martingale</span>
-            </div>
-            <p className="text-[11px] text-slate-400 leading-relaxed">
-              Losses increase stake via <strong>Martingale</strong> or <strong>Same-Loss-Recovery</strong>. A single win restores all past losses plus win amount.
-            </p>
-          </div>
-
-          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
-            <div className="text-purple-400 font-bold flex items-center gap-2">
-              <span className="w-5 h-5 rounded-md bg-purple-500/20 text-purple-400 flex items-center justify-center text-[11px] font-black">
-                4
-              </span>
-              <span>Run Auto or 1-Click</span>
-            </div>
-            <p className="text-[11px] text-slate-400 leading-relaxed">
-              Click <strong>RUN AUTO BOT</strong> or <strong>TRADE 1 TICK</strong>. Stops automatically at <strong>Expected Profit ($20)</strong> or <strong>Max Loss ($50)</strong>.
-            </p>
-          </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs font-mono">
+          <Guide title="Real data" text="The scanner uses only tick history and tick streams returned by Deriv. No generated seed prices are used." />
+          <Guide title="Observed evidence" text="Markov and digit-frequency values are measured from the selected real sample. They are not guaranteed win percentages." />
+          <Guide title="Real settlement" text="A trade is marked WON or LOST only after Deriv returns a settled proposal_open_contract result." />
         </div>
       </div>
 
-      {/* DBOT XML HEADER & PRIMARY RUN / STOP COCKPIT */}
-      <div className="p-4 sm:p-6 rounded-2xl border border-emerald-500/40 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/40 shadow-2xl relative overflow-hidden">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none" />
-
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5 relative z-10">
+      <div className="p-4 sm:p-6 rounded-2xl border border-emerald-500/40 bg-gradient-to-br from-slate-900 via-slate-900 to-emerald-950/30 shadow-xl">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
           <div className="space-y-2">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 text-xs font-mono font-black uppercase tracking-wider flex items-center gap-1.5">
-                <Code2 className="w-3.5 h-3.5 text-emerald-400" />
-                DBOT XML DIGITMATCH ENGINE
-              </span>
-              <span className="px-2.5 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-xs font-mono">
-                Market: <strong className="text-white">1HZ10V</strong>
-              </span>
-              <span className="px-2.5 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-xs font-mono">
-                Type: <strong className="text-emerald-400">DIGITMATCH</strong>
-              </span>
-              <span className="px-2.5 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-xs font-mono">
-                Restart On Error: <strong className="text-cyan-400">TRUE</strong>
-              </span>
+              <span className="px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 text-xs font-mono font-black flex items-center gap-1.5"><Code2 className="w-3.5 h-3.5" /> DIGITMATCH ENGINE</span>
+              <span className="px-2.5 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700 text-xs font-mono">Market: <strong className="text-white">{currentSymbol}</strong></span>
             </div>
-
-            <h2 className="text-2xl sm:text-3xl font-black text-white tracking-tight flex items-center gap-2.5">
-              <span>Deriv Volatility 10 (1s) Matches Bot</span>
-              <span className="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold">
-                100% REAL
-              </span>
-            </h2>
-
-            <p className="text-xs sm:text-sm text-slate-300 max-w-2xl leading-relaxed">
-              Automated high-frequency XML DBot trading directly on the live Deriv tick stream. Operates on{' '}
-              <strong className="text-white">1HZ10V</strong> with <strong className="text-white">DIGITMATCH</strong> (834% to 950% payout multiplier). Automatically adjusts recovery stakes on loss and resets to Win Amount on success.
-            </p>
+            <h2 className="text-2xl sm:text-3xl font-black text-white">Live Matches Bot</h2>
+            <p className="text-xs sm:text-sm text-slate-300 max-w-2xl">The app first requests a real Deriv proposal. The real ask price and payout returned by Deriv are then used for the buy; no fixed 834%/950% payout is assumed.</p>
           </div>
 
-          {/* Master Control Buttons */}
-          <div className="flex flex-wrap items-center gap-3 self-start lg:self-auto shrink-0">
-            {/* Live Working Balance indicator */}
-            {currentBalance !== undefined && (
-              <div className="flex items-center gap-2.5 p-2 px-3 rounded-xl bg-slate-950 border border-slate-800 font-mono shadow-inner">
-                <div>
-                  <div className="text-[9px] uppercase text-slate-400 font-bold">
-                    {accountMode === 'REAL' ? 'Live Real Balance' : 'Practice Demo'}
-                  </div>
-                  <div className="text-sm font-black text-emerald-400">
-                    ${currentBalance.toFixed(2)} USD
-                  </div>
-                </div>
-                {accountMode === 'REAL' && onOpenCashier && (
-                  <button
-                    type="button"
-                    onClick={onOpenCashier}
-                    className="text-[10px] px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-bold border border-emerald-500/40 transition cursor-pointer"
-                    title="Open Cashier to deposit funds"
-                  >
-                    + Deposit
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Quick 1-Click Trade Now */}
-            <button
-              id="dbot-manual-trade-btn"
-              onClick={handleManualTradeNow}
-              disabled={autoMatchesActive}
-              className="px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 font-mono font-bold text-xs flex items-center gap-2 border border-slate-700 transition-all cursor-pointer shadow-md"
-              title="Execute a single 100% real live match trade now"
-            >
-              <Zap className="w-4 h-4 text-amber-400" />
-              <span>TRADE 1 TICK (${nextCalculatedStake.toFixed(2)})</span>
-            </button>
-
-            {/* Run / Stop Auto Bot Button */}
-            <button
-              id="toggle-auto-matches-bot-btn"
-              onClick={() => onToggleAutoMatches(!autoMatchesActive)}
-              className={`px-7 py-3 rounded-xl font-mono font-black text-sm flex items-center gap-2.5 shadow-xl transition-all cursor-pointer ${
-                autoMatchesActive
-                  ? 'bg-rose-500 hover:bg-rose-600 text-white animate-pulse shadow-rose-950/60 ring-2 ring-rose-400/50'
-                  : 'bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-slate-950 shadow-emerald-950/60 ring-2 ring-emerald-300'
-              }`}
-            >
-              {autoMatchesActive ? (
-                <>
-                  <Square className="w-4 h-4 fill-white" />
-                  <span>STOP DBOT (ACTIVE)</span>
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-slate-950" />
-                  <span>RUN AUTO BOT (100% REAL)</span>
-                </>
-              )}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="p-2 px-3 rounded-xl bg-slate-950 border border-slate-800 font-mono">
+              <div className="text-[9px] uppercase text-slate-400 font-bold">{accountMode === 'REAL' ? 'Real balance' : 'Virtual balance'}</div>
+              <div className="text-sm font-black text-emerald-400">${currentBalance.toFixed(2)}</div>
+            </div>
+            {onOpenCashier && <button onClick={onOpenCashier} className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs font-bold text-slate-200">Official Cashier</button>}
+            <button onClick={handleManualTrade} disabled={autoMatchesActive || !activeTicks?.digits?.length} className="px-4 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 font-mono font-bold text-xs flex items-center gap-2 border border-slate-700"><Zap className="w-4 h-4 text-amber-400" /> TRADE 1 TICK (${(config.stake || 0.35).toFixed(2)})</button>
+            <button onClick={() => onToggleAutoMatches(!autoMatchesActive)} className={`px-7 py-3 rounded-xl font-mono font-black text-sm flex items-center gap-2.5 ${autoMatchesActive ? 'bg-rose-500 text-white' : 'bg-emerald-500 text-slate-950'}`}>
+              {autoMatchesActive ? <><Square className="w-4 h-4 fill-white" /> STOP AUTO</> : <><Play className="w-4 h-4 fill-slate-950" /> RUN AUTO</>}
             </button>
           </div>
         </div>
       </div>
 
-      {/* DBOT XML VARIABLES TELEMETRY DASHBOARD */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 shadow-md">
-          <div className="text-[10px] font-mono uppercase text-slate-400 font-bold">Initial Amount</div>
-          <div className="text-lg font-black text-white font-mono mt-0.5">
-            ${(activeConfig.stake || 0.35).toFixed(2)}
-          </div>
-          <div className="text-[10px] text-slate-500 font-mono">XML: Initial Stake</div>
-        </div>
-
-        <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 shadow-md">
-          <div className="text-[10px] font-mono uppercase text-slate-400 font-bold">Win Amount</div>
-          <div className="text-lg font-black text-emerald-400 font-mono mt-0.5">
-            ${(activeConfig.winAmount || activeConfig.stake || 0.35).toFixed(2)}
-          </div>
-          <div className="text-[10px] text-slate-500 font-mono">XML: Reset on Win</div>
-        </div>
-
-        <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 shadow-md">
-          <div className="text-[10px] font-mono uppercase text-slate-400 font-bold">Expected Profit</div>
-          <div className="text-lg font-black text-cyan-400 font-mono mt-0.5">
-            ${(activeConfig.expectedProfit || 20.0).toFixed(2)}
-          </div>
-          <div className="text-[10px] text-slate-500 font-mono">
-            Net: <span className={sessionStats.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>${sessionStats.netProfit.toFixed(2)}</span>
-          </div>
-        </div>
-
-        <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 shadow-md">
-          <div className="text-[10px] font-mono uppercase text-slate-400 font-bold">Max Acceptable Loss</div>
-          <div className="text-lg font-black text-rose-400 font-mono mt-0.5">
-            ${(activeConfig.maxAcceptableLoss || 50.0).toFixed(2)}
-          </div>
-          <div className="text-[10px] text-slate-500 font-mono">
-            Loss: ${sessionStats.cumulativeLoss.toFixed(2)}
-          </div>
-        </div>
-
-        <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 shadow-md">
-          <div className="text-[10px] font-mono uppercase text-slate-400 font-bold">Next Trade Stake</div>
-          <div className="text-lg font-black text-amber-400 font-mono mt-0.5">
-            ${nextCalculatedStake.toFixed(2)}
-          </div>
-          <div className="text-[10px] text-slate-500 font-mono">
-            Losses: {sessionStats.consecutiveLosses}
-          </div>
-        </div>
-
-        <div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 shadow-md">
-          <div className="text-[10px] font-mono uppercase text-slate-400 font-bold">Current Last Digit</div>
-          <div className="text-lg font-black text-purple-300 font-mono mt-0.5 flex items-center gap-1">
-            <span className="px-2 py-0.2 rounded bg-purple-600/40 border border-purple-500/50 text-white">
-              {currentLastDigit}
-            </span>
-            <span className="text-xs text-slate-400 font-normal">({currentSymbol})</span>
-          </div>
-          <div className="text-[10px] text-slate-500 font-mono">Live Deriv Tick</div>
-        </div>
-      </div>
-
-      {/* DBOT CONFIGURATION CONTROLS */}
-      <div className="p-4 sm:p-5 rounded-2xl border border-slate-800 bg-slate-900/90 shadow-xl space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">
-              <Zap className="w-4 h-4 text-emerald-400" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-white uppercase tracking-tight">
-                DBot Parameters &amp; Next Trade Conditions
-              </h3>
-              <p className="text-xs text-slate-400">
-                Direct translation of Blockly XML variables into high-speed executable TypeScript.
-              </p>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2 rounded-2xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+          <div className="p-4 border-b border-slate-800 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2"><Target className="w-4 h-4 text-purple-400" /><h3 className="text-sm font-bold text-white">Observed Matches candidates</h3></div>
+            <div className="flex items-center gap-2">
+              <select value={scanDepth} onChange={(e) => onScanDepthChange(Number(e.target.value))} className="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200 font-mono">
+                {[100, 250, 500, 1000, 1500, 2000].map((depth) => <option key={depth} value={depth}>{depth} ticks</option>)}
+              </select>
+              <button onClick={() => onTriggerDeepScan(scanDepth)} disabled={isDeepScanning} className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5">
+                <RefreshCw className={`w-3.5 h-3.5 ${isDeepScanning ? 'animate-spin' : ''}`} /> {isDeepScanning ? 'Loading real history…' : 'Deep Scan'}
+              </button>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-mono text-slate-400">Engine State:</span>
-            <span
-              className={`px-3 py-1 rounded-full text-xs font-mono font-bold flex items-center gap-1.5 ${
-                autoMatchesActive
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse'
-                  : 'bg-slate-800 text-slate-400'
-              }`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  autoMatchesActive ? 'bg-emerald-400 animate-ping' : 'bg-slate-500'
-                }`}
-              />
-              {autoMatchesActive ? 'TRADING LIVE DERIV STREAM' : 'READY TO TRADE'}
-            </span>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Parameter 1: Initial Amount (Stake) */}
-          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase text-slate-400 font-bold">
-              <span>Initial Amount</span>
-              <span className="text-emerald-400">Deriv Min $0.35</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              {[0.35, 0.5, 1.0, 2.0].map((amt) => (
-                <button
-                  key={amt}
-                  type="button"
-                  onClick={() => handleConfigChange({ ...activeConfig, stake: amt, winAmount: amt })}
-                  className={`flex-1 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
-                    activeConfig.stake === amt
-                      ? 'bg-emerald-600 text-white shadow'
-                      : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-                  }`}
-                >
-                  ${amt.toFixed(2)}
-                </button>
-              ))}
-            </div>
-            <div className="text-[10px] text-slate-500 font-mono">
-              Net profit on single match win: +${((activeConfig.stake || 0.35) * 7.3428).toFixed(2)} USD
-            </div>
-          </div>
-
-          {/* Parameter 2: Expected Profit (Take Profit) */}
-          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase text-slate-400 font-bold">
-              <span>Expected Profit</span>
-              <span className="text-cyan-400 font-bold">${(activeConfig.expectedProfit || 20).toFixed(2)}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              {[10, 20, 50, 100].map((tp) => (
-                <button
-                  key={tp}
-                  type="button"
-                  onClick={() => handleConfigChange({ ...activeConfig, expectedProfit: tp })}
-                  className={`flex-1 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
-                    activeConfig.expectedProfit === tp
-                      ? 'bg-cyan-600 text-white shadow'
-                      : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-                  }`}
-                >
-                  ${tp}
-                </button>
-              ))}
-            </div>
-            <div className="text-[10px] text-slate-500 font-mono">
-              Bot automatically pauses and secures capital upon reaching target.
-            </div>
-          </div>
-
-          {/* Parameter 3: Max Acceptable Loss (Stop Loss) */}
-          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-            <div className="flex items-center justify-between text-[10px] font-mono uppercase text-slate-400 font-bold">
-              <span>Max Acceptable Loss</span>
-              <span className="text-rose-400 font-bold">${(activeConfig.maxAcceptableLoss || 50).toFixed(2)}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              {[25, 50, 75, 100].map((sl) => (
-                <button
-                  key={sl}
-                  type="button"
-                  onClick={() => handleConfigChange({ ...activeConfig, maxAcceptableLoss: sl })}
-                  className={`flex-1 py-1 rounded-lg text-xs font-mono font-bold transition-all cursor-pointer ${
-                    activeConfig.maxAcceptableLoss === sl
-                      ? 'bg-rose-600 text-white shadow'
-                      : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-                  }`}
-                >
-                  ${sl}
-                </button>
-              ))}
-            </div>
-            <div className="text-[10px] text-slate-500 font-mono">
-              Hard circuit breaker halts trading if drawdown hits this limit.
-            </div>
-          </div>
-
-          {/* Parameter 4: Next Trade Condition */}
-          <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-            <div className="text-[10px] font-mono uppercase text-slate-400 font-bold">
-              Next Trade Condition
-            </div>
-            <select
-              value={activeConfig.nextTradeCondition || 'MARTINGALE'}
-              onChange={(e) =>
-                handleConfigChange({
-                  ...activeConfig,
-                  nextTradeCondition: e.target.value as any,
-                })
-              }
-              className="w-full py-1.5 px-2.5 rounded-lg bg-slate-900 border border-slate-700 text-xs font-mono font-bold text-white focus:outline-none focus:border-emerald-500 cursor-pointer"
-            >
-              <option value="MARTINGALE">Smart Martingale (1.15x per loss)</option>
-              <option value="SAME_LOSS_RECOVERY">Same-Loss-Price (1 Win Recovers All)</option>
-              <option value="RESET_ON_WIN">Fixed Base Stake (No Martingale)</option>
-            </select>
-            <div className="text-[10px] text-slate-500 font-mono">
-              Due to 8.34x payout, 1 win recovers multiple prior losses easily.
-            </div>
-          </div>
-        </div>
-
-        {/* Prediction Target Strategy Row */}
-        <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-0.5">
-            <div className="text-xs font-bold text-white font-mono flex items-center gap-1.5">
-              <Target className="w-3.5 h-3.5 text-emerald-400" />
-              Target Digit Strategy:
-            </div>
-            <div className="text-[11px] text-slate-400">
-              Select how the predicted match digit is determined for each 1HZ10V contract:
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={() => handleConfigChange({ ...activeConfig, targetStrategy: 'REPEAT_ENTRY', customTargetDigit: undefined })}
-              className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition cursor-pointer ${
-                activeConfig.targetStrategy === 'REPEAT_ENTRY' && activeConfig.customTargetDigit === undefined
-                  ? 'bg-emerald-500 text-slate-950 shadow'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              Repeat Entry Spot (Screenshot Mode)
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleConfigChange({ ...activeConfig, targetStrategy: 'MARKOV_TRANSITION', customTargetDigit: undefined })}
-              className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition cursor-pointer ${
-                activeConfig.targetStrategy === 'MARKOV_TRANSITION'
-                  ? 'bg-purple-600 text-white shadow'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              Markov Transition Edge
-            </button>
-
-            {/* Custom Target Digit Picker */}
-            <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-lg border border-slate-800">
-              <span className="text-[10px] font-mono text-slate-500 px-1">Fixed:</span>
-              {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((d) => (
-                <button
-                  key={d}
-                  type="button"
-                  onClick={() => handleConfigChange({ ...activeConfig, targetStrategy: 'CUSTOM', customTargetDigit: d })}
-                  className={`w-6 h-6 rounded flex items-center justify-center text-xs font-mono font-bold transition cursor-pointer ${
-                    activeConfig.customTargetDigit === d
-                      ? 'bg-amber-400 text-slate-950 font-black'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  {d}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* LIVE DERIV STATEMENT RECEIPTS (Pixel-perfect audit trail of all real matches trades) */}
-      <DerivStatementReceipts
-        trades={tradeHistory.filter((t) => t.contractType === 'MATCHES')}
-        onClearHistory={onClearHistory}
-        currency="USD"
-      />
-
-      {/* MULTI-MARKET STATISTICAL RADAR */}
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/60 overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Target className="w-4 h-4 text-emerald-400" />
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-              Real-Time Synthetic Index Rankings ({signals.length} Markets)
-            </h3>
-          </div>
-          <span className="text-[10px] text-slate-400 font-mono">
-            Active: <strong className="text-emerald-400">{currentSymbol}</strong> (Click any to switch)
-          </span>
-        </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs font-mono">
-            <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] border-b border-slate-800">
-              <tr>
-                <th className="py-2.5 px-4">Market</th>
-                <th className="py-2.5 px-3">Target Digit</th>
-                <th className="py-2.5 px-3">Markov Prob</th>
-                <th className="py-2.5 px-3">Surge Frequency</th>
-                <th className="py-2.5 px-3">Delay</th>
-                <th className="py-2.5 px-3 text-center">Confidence</th>
-                <th className="py-2.5 px-4 text-right">Switch</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/60">
-              {signals.map((sig, idx) => {
-                const isSelected = sig.symbol === currentSymbol;
-
-                return (
-                  <tr
-                    key={sig.symbol}
-                    className={`hover:bg-slate-800/30 transition-colors ${
-                      isSelected ? 'bg-emerald-500/10' : ''
-                    }`}
-                  >
-                    <td className="py-3 px-4">
-                      <div className="flex items-center gap-2">
-                        <span className="w-5 text-center text-slate-500 font-bold text-[11px]">
-                          {idx + 1}
-                        </span>
-                        <div>
-                          <div className="font-bold text-white flex items-center gap-1.5">
-                            {sig.displayName}
-                            {isSelected && (
-                              <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                                ACTIVE
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-[10px] text-slate-400">{sig.symbol}</div>
-                        </div>
-                      </div>
-                    </td>
-
-                    <td className="py-3 px-3">
-                      <span className="px-2.5 py-1 rounded bg-purple-600/30 border border-purple-500/50 text-purple-200 font-black text-sm">
-                        {sig.targetDigit}
-                      </span>
-                    </td>
-
-                    <td className="py-3 px-3">
-                      <span className="font-bold text-emerald-400">{sig.markovProbability}%</span>
-                    </td>
-
-                    <td className="py-3 px-3 text-slate-300">
-                      {sig.recentClusterCount} in 30t
-                    </td>
-
-                    <td className="py-3 px-3">
-                      <span className="text-amber-400 font-bold">{sig.delayTicks}t</span>
-                    </td>
-
-                    <td className="py-3 px-3 text-center">
-                      <span
-                        className={`font-black text-sm ${
-                          sig.probabilityScore >= 88
-                            ? 'text-emerald-400'
-                            : sig.probabilityScore >= 80
-                            ? 'text-teal-400'
-                            : 'text-slate-300'
-                        }`}
-                      >
-                        {sig.probabilityScore}%
-                      </span>
-                    </td>
-
-                    <td className="py-3 px-4 text-right">
-                      <button
-                        onClick={() => onSelectMarket(sig.symbol)}
-                        className={`px-3 py-1 rounded text-xs font-bold transition-colors cursor-pointer ${
-                          isSelected
-                            ? 'bg-emerald-500 text-slate-950 font-black'
-                            : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
-                        }`}
-                      >
-                        {isSelected ? 'Loaded' : 'Switch'}
-                      </button>
-                    </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-950/60 text-slate-400 uppercase font-mono text-[10px]"><tr><th className="text-left p-3">Market</th><th className="text-left p-3">Target</th><th className="text-left p-3">Observed score</th><th className="text-left p-3">Markov</th><th className="text-left p-3">Recent</th><th className="text-left p-3">State</th></tr></thead>
+              <tbody className="divide-y divide-slate-800">
+                {signals.length === 0 && <tr><td colSpan={6} className="p-6 text-center text-slate-500">Waiting for enough real Deriv ticks to rank signals.</td></tr>}
+                {signals.map((signal) => (
+                  <tr key={signal.symbol} onClick={() => onSelectMarket(signal.symbol)} className={`cursor-pointer hover:bg-slate-800/40 ${signal.symbol === currentSymbol ? 'bg-purple-500/5' : ''}`}>
+                    <td className="p-3"><div className="font-bold text-white">{signal.displayName}</div><div className="text-[10px] text-slate-500 font-mono">{signal.symbol}</div></td>
+                    <td className="p-3"><span className="w-7 h-7 inline-flex items-center justify-center rounded-lg bg-purple-500/20 text-purple-300 border border-purple-500/30 font-black">{signal.targetDigit}</span></td>
+                    <td className="p-3 font-mono text-emerald-300 font-bold">{signal.probabilityScore.toFixed(1)}%</td>
+                    <td className="p-3 font-mono text-cyan-300">{signal.markovProbability.toFixed(1)}%</td>
+                    <td className="p-3 font-mono text-slate-300">{signal.recentClusterCount}/30</td>
+                    <td className="p-3">{signal.isTriggerReady ? <span className="inline-flex items-center gap-1 text-emerald-300"><CheckCircle2 className="w-3.5 h-3.5" /> evidence gate</span> : <span className="text-slate-500">waiting</span>}</td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 space-y-4">
+          <div className="flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-emerald-400" /><h3 className="text-sm font-bold text-white">Execution settings</h3></div>
+          <label className="block text-xs text-slate-400">Stake
+            <input type="number" min="0.01" step="0.01" value={config.stake} onChange={(e) => updateConfig({ ...config, stake: Math.max(0.01, Number(e.target.value)) })} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono" />
+          </label>
+          <label className="block text-xs text-slate-400">Target strategy
+            <select value={config.targetStrategy} onChange={(e) => updateConfig({ ...config, targetStrategy: e.target.value as AutoMatchesConfig['targetStrategy'] })} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
+              <option value="MARKOV_TRANSITION">Observed Markov transition</option>
+              <option value="HOTTEST_CLUSTER">Observed hottest digit</option>
+              <option value="REPEAT_ENTRY">Repeat current digit</option>
+              <option value="CUSTOM">Custom target</option>
+            </select>
+          </label>
+          {config.targetStrategy === 'CUSTOM' && (
+            <label className="block text-xs text-slate-400">Custom digit
+              <input type="number" min="0" max="9" value={config.customTargetDigit ?? 0} onChange={(e) => updateConfig({ ...config, customTargetDigit: Math.max(0, Math.min(9, Number(e.target.value))) })} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono" />
+            </label>
+          )}
+          <label className="block text-xs text-slate-400">Recovery display mode
+            <select value={recoveryMode} onChange={(e) => onRecoveryModeChange(e.target.value as typeof recoveryMode)} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
+              <option value="X2_SUPER_RECOVERY">X2 recovery planning</option>
+              <option value="X4_SUPER_RECOVERY">X4 recovery planning</option>
+            </select>
+          </label>
+          <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-400 font-mono space-y-1">
+            <div>Trades settled: {sessionStats.totalTrades}</div>
+            <div>Wins / losses: {sessionStats.wins} / {sessionStats.losses}</div>
+            <div>Actual session P/L: <span className={sessionStats.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{sessionStats.netProfit >= 0 ? '+' : ''}${sessionStats.netProfit.toFixed(2)}</span></div>
+          </div>
+          <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-200 flex gap-2"><AlertTriangle className="w-4 h-4 shrink-0" /><span>Signal statistics cannot guarantee the next digit. Contract price and payout are accepted only from the live Deriv proposal.</span></div>
         </div>
       </div>
     </div>
   );
 };
+
+const Guide: React.FC<{ title: string; text: string }> = ({ title, text }) => (
+  <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
+    <div className="text-emerald-400 font-bold flex items-center gap-2"><Activity className="w-3.5 h-3.5" /> {title}</div>
+    <p className="text-[11px] text-slate-400 leading-relaxed">{text}</p>
+  </div>
+);
