@@ -4,7 +4,6 @@ import {
   TrendingDown,
   Zap,
   Star,
-  Key,
   Square,
   ArrowDownLeft,
   ArrowUpRight,
@@ -57,12 +56,12 @@ export const Header: React.FC<HeaderProps> = ({
   totalTicksReceived,
   watchlistCount = 0,
   onOpenWatchlist,
-  onOpenConnectDeriv,
   onOpenCashierDeposit,
   onOpenCashierWithdraw,
   onOpenAuth,
   userProfile,
   accountInfo,
+  onToggleAccountMode,
   activeBot,
   onStopActiveBot,
 }) => {
@@ -72,10 +71,48 @@ export const Header: React.FC<HeaderProps> = ({
     ? accountInfo.isVirtual
       ? 'DEMO'
       : 'REAL'
-    : 'DEMO';
+    : 'REAL';
   const displayBalance = accountInfo?.isAuthorized && accountInfo.balance !== undefined
     ? accountInfo.balance.toFixed(2)
     : '—';
+
+  const selectTradingMode = React.useCallback((requested: AccountMode) => {
+    if (accountInfo?.isAuthorized) {
+      const currentIsRequested = requested === actualMode;
+      const linked = accountInfo.accountsList || [];
+      const match = linked.find((account) => requested === 'DEMO' ? account.is_virtual : !account.is_virtual);
+      if (currentIsRequested || match) {
+        onToggleAccountMode(requested);
+        return;
+      }
+    }
+
+    try {
+      localStorage.setItem('deriv_requested_mode', requested);
+    } catch {}
+    window.location.assign(derivService.getOAuthRedirectUrl());
+  }, [accountInfo, actualMode, onToggleAccountMode]);
+
+  React.useEffect(() => {
+    if (!accountInfo?.isAuthorized) return;
+
+    let requested: AccountMode | null = null;
+    try {
+      const saved = localStorage.getItem('deriv_requested_mode');
+      requested = saved === 'DEMO' || saved === 'REAL' ? saved : null;
+    } catch {}
+    if (!requested) return;
+
+    if (requested === actualMode) {
+      try { localStorage.removeItem('deriv_requested_mode'); } catch {}
+      return;
+    }
+
+    const linked = accountInfo.accountsList || [];
+    const match = linked.find((account) => requested === 'DEMO' ? account.is_virtual : !account.is_virtual);
+    if (match) onToggleAccountMode(requested);
+    try { localStorage.removeItem('deriv_requested_mode'); } catch {}
+  }, [accountInfo?.isAuthorized, accountInfo?.loginId, accountInfo?.accountsList, actualMode, onToggleAccountMode]);
 
   const getActiveBotLabel = () => {
     switch (activeBot) {
@@ -131,22 +168,34 @@ export const Header: React.FC<HeaderProps> = ({
 
           <div className="flex items-center gap-2 p-1.5 px-3 rounded-xl bg-slate-900 border border-slate-800 shadow-inner">
             <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
-            <div className="font-mono text-xs">
-              <div className="flex items-center gap-2">
-                <span className="font-extrabold text-white">{accountInfo?.isAuthorized ? accountInfo.loginId : 'Not authorized'}</span>
-                {accountInfo?.isAuthorized && (
-                  <span className={`text-[9px] px-2 py-0.5 rounded font-bold ${actualMode === 'REAL' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-400/20 text-amber-300'}`}>{actualMode}</span>
-                )}
+            <div className="font-mono text-xs min-w-[118px]">
+              <div className="font-extrabold text-white truncate max-w-[145px]">
+                {accountInfo?.isAuthorized ? accountInfo.loginId : 'Choose account'}
               </div>
               <div className="text-[10px] text-slate-400">Balance: <span className="text-emerald-400 font-bold">{displayBalance} {accountInfo?.currency || ''}</span>{latency > 0 ? ` • ${latency}ms` : ''}</div>
             </div>
-            {onOpenConnectDeriv && (
-              <button onClick={onOpenConnectDeriv} className="p-1 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-slate-800" title="Deriv account settings">
-                <Key className="w-3.5 h-3.5" />
+
+            <div className="flex items-center gap-1 rounded-lg bg-slate-950 p-0.5 border border-slate-800">
+              <button
+                type="button"
+                onClick={() => selectTradingMode('DEMO')}
+                className={`px-2 py-1 rounded-md text-[9px] font-black font-mono transition ${accountInfo?.isAuthorized && actualMode === 'DEMO' ? 'bg-amber-400 text-slate-950' : 'text-amber-300 hover:bg-amber-400/15'}`}
+                title="Use your Deriv demo account"
+              >
+                DEMO
               </button>
-            )}
+              <button
+                type="button"
+                onClick={() => selectTradingMode('REAL')}
+                className={`px-2 py-1 rounded-md text-[9px] font-black font-mono transition ${accountInfo?.isAuthorized && actualMode === 'REAL' ? 'bg-emerald-500 text-slate-950' : 'text-emerald-300 hover:bg-emerald-500/15'}`}
+                title="Use your Deriv real account"
+              >
+                REAL
+              </button>
+            </div>
+
             {accountInfo?.isAuthorized && (
-              <button onClick={() => derivService.logout()} className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10" title="Disconnect Deriv account">
+              <button onClick={() => derivService.logout()} className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10" title="Sign out of Deriv account">
                 <LogOut className="w-3.5 h-3.5" />
               </button>
             )}
