@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="derivBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090d16"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#022c22"/>
+    </linearGradient>
+    <linearGradient id="derivGreen" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="derivRed" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff444f"/>
+      <stop offset="100%" stop-color="#e11d48"/>
+    </linearGradient>
+    <linearGradient id="derivCyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background rounded rect -->
+  <rect width="512" height="512" rx="112" fill="url(#derivBg)"/>
+  
+  <!-- Outer subtle radar ring -->
+  <circle cx="256" cy="256" r="190" fill="none" stroke="#10b981" stroke-width="4" stroke-opacity="0.25" stroke-dasharray="8 8"/>
+  <circle cx="256" cy="256" r="140" fill="none" stroke="#06b6d4" stroke-width="2" stroke-opacity="0.3"/>
+
+  <!-- Deriv Distinct D-Apex / Target Reticle Shape -->
+  <path d="M160 120 L270 120 C350 120 400 170 400 256 C400 342 350 392 270 392 L160 392 Z" fill="none" stroke="url(#derivGreen)" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- Sniper Crosshairs & Target Digit 7 -->
+  <circle cx="256" cy="256" r="54" fill="#022c22" stroke="url(#derivRed)" stroke-width="6"/>
+  <text x="256" y="278" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="64" font-weight="900" fill="#10b981" text-anchor="middle">🎯</text>
+
+  <!-- Pulse dots -->
+  <circle cx="160" cy="256" r="10" fill="#10b981"/>
+  <circle cx="256" cy="120" r="10" fill="#ff444f"/>
+  <circle cx="352" cy="256" r="10" fill="#06b6d4"/>
+</svg>
