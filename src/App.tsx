@@ -3,20 +3,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { derivService } from './services/derivWs';
 import {
-  ActiveSymbol,
-  DigitStat,
+  AccountMode,
+  ActiveBotType,
+  AutoMatchesConfig,
+  DerivAccountInfo,
   MarketAnalysis,
   RiskConfig,
   TradeRecord,
-  DerivAccountInfo,
-  AccountMode,
-  ActiveBotType,
   UserProfile,
 } from './types';
-import { evaluateMarketStrength, analyzeDigits } from './utils/indicators';
+import { analyzeDigits, evaluateMarketStrength } from './utils/indicators';
+import { findBestAutoMatchesTarget } from './utils/autoMatchesEngine';
+import { calculateNextStake } from './utils/recoveryEngine';
+import { playLossSound, playOrderDispatchedSound, playWinSound } from './utils/soundEffects';
 import { Header } from './components/Header';
 import { StrongestMarketScanner } from './components/StrongestMarketScanner';
 import { MatchesDigitAnalyzer } from './components/MatchesDigitAnalyzer';
@@ -32,23 +34,14 @@ import { DeepScanAutoMatches } from './components/DeepScanAutoMatches';
 import { BulkMultiTrader } from './components/BulkMultiTrader';
 import { FloatingAutoMatchesBar } from './components/FloatingAutoMatchesBar';
 import { AutoMatchesSafetyModal } from './components/AutoMatchesSafetyModal';
-import { AutoMatchesConfig } from './types';
-import { findBestAutoMatchesTarget, calculateSameLosingPriceRecovery } from './utils/autoMatchesEngine';
-import { CONTRACT_PAYOUT_PRESETS, calculateNextStake } from './utils/recoveryEngine';
-import { playWinSound, playLossSound, playOrderDispatchedSound } from './utils/soundEffects';
 import {
-  ShieldCheck,
-  BarChart3,
-  Target,
-  Zap,
   Activity,
-  Info,
   Layers,
-  Star,
-  Play,
+  ShieldCheck,
   Square,
-  RefreshCw,
+  Target,
   Wallet,
+  Zap,
 } from 'lucide-react';
 
 const POPULAR_SYMBOLS = [
@@ -64,245 +57,159 @@ const POPULAR_SYMBOLS = [
   { symbol: 'R_10', name: 'Volatility 10 Index' },
 ];
 
+const REAL_HISTORY_KEY = 'deriv_real_trade_history_v2';
+const REAL_STATS_KEY = 'deriv_real_session_stats_v2';
+
+const EMPTY_STATS = {
+  totalTrades: 0,
+  wins: 0,
+  losses: 0,
+  netProfit: 0,
+  consecutiveLosses: 0,
+  cumulativeLoss: 0,
+  peakDrawdown: 0,
+};
+
+type TradeInput = {
+  contractType: 'MATCHES' | 'DIFFERS' | 'OVER' | 'UNDER' | 'RISE' | 'FALL';
+  targetValue: number | string;
+  stake: number;
+  symbol?: string;
+  entryPrice?: number;
+  entryDigit?: number;
+  payout?: number;
+};
+
+function toDerivContractType(type: TradeInput['contractType']): string {
+  switch (type) {
+    case 'MATCHES': return 'DIGITMATCH';
+    case 'DIFFERS': return 'DIGITDIFF';
+    case 'OVER': return 'DIGITOVER';
+    case 'UNDER': return 'DIGITUNDER';
+    case 'FALL': return 'PUT';
+    case 'RISE':
+    default: return 'CALL';
+  }
+}
+
+function isDigitContract(type: TradeInput['contractType']): boolean {
+  return type === 'MATCHES' || type === 'DIFFERS' || type === 'OVER' || type === 'UNDER';
+}
+
+function makeClientTradeId(counter: number): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `client-${crypto.randomUUID()}`;
+  }
+  return `client-${Date.now()}-${counter}`;
+}
+
 export default function App() {
-  const [currentSymbol, setCurrentSymbol] = useState<string>('1HZ10V');
-  const [connected, setConnected] = useState<boolean>(false);
-  const [latency, setLatency] = useState<number>(0);
-  const [totalTicksReceived, setTotalTicksReceived] = useState<number>(0);
-  const [sampleSize, setSampleSize] = useState<number>(500);
+  const [currentSymbol, setCurrentSymbol] = useState('1HZ10V');
+  const currentSymbolRef = useRef(currentSymbol);
+  currentSymbolRef.current = currentSymbol;
 
-  // Market data for active symbol with instant realistic seed
-  const [prices, setPrices] = useState<number[]>(() => {
-    return derivService.generateRealisticHistory('1HZ10V', 80);
-  });
-  const [digits, setDigits] = useState<number[]>(() => {
-    const initialPrices = derivService.generateRealisticHistory('1HZ10V', 80);
-    return initialPrices.map((p) => derivService.extractLastDigit(p, '1HZ10V'));
-  });
-  const [currentPrice, setCurrentPrice] = useState<number>(1042.86);
-  const [lastDigit, setLastDigit] = useState<number>(6);
-  const [pip, setPip] = useState<number>(2);
+  const [connected, setConnected] = useState(false);
+  const [latency, setLatency] = useState(0);
+  const [totalTicksReceived, setTotalTicksReceived] = useState(0);
+  const [sampleSize, setSampleSize] = useState(500);
+  const [prices, setPrices] = useState<number[]>([]);
+  const [digits, setDigits] = useState<number[]>([]);
+  const [currentPrice, setCurrentPrice] = useState(0);
+  const [lastDigit, setLastDigit] = useState(0);
+  const [pip, setPip] = useState(2);
 
-  // Analyses across all monitored markets initialized immediately
-  const [marketAnalyses, setMarketAnalyses] = useState<Record<string, MarketAnalysis>>(() => {
-    const initial: Record<string, MarketAnalysis> = {};
-    POPULAR_SYMBOLS.forEach((sym) => {
-      const generatedPrices = derivService.generateRealisticHistory(sym.symbol, 80);
-      const generatedDigits = generatedPrices.map((p) => derivService.extractLastDigit(p, sym.symbol));
-      initial[sym.symbol] = evaluateMarketStrength(sym.symbol, sym.name, generatedPrices, generatedDigits);
-    });
-    return initial;
-  });
-  const marketAnalysesRef = useRef<Record<string, MarketAnalysis>>(marketAnalyses);
+  const [marketAnalyses, setMarketAnalyses] = useState<Record<string, MarketAnalysis>>({});
+  const marketAnalysesRef = useRef(marketAnalyses);
   marketAnalysesRef.current = marketAnalyses;
-  
-  // Pending trades awaiting next real tick from Deriv
+  const marketTickDataRef = useRef<Record<string, { prices: number[]; digits: number[] }>>({});
+  const historyPendingRef = useRef(new Set<string>());
+
+  const [accountInfo, setAccountInfo] = useState<DerivAccountInfo>(() => derivService.getAccountInfo());
+  const accountInfoRef = useRef(accountInfo);
+  accountInfoRef.current = accountInfo;
+  const accountMode: AccountMode = accountInfo.isAuthorized && accountInfo.isVirtual ? 'DEMO' : 'REAL';
+  const liveBalance = accountInfo.isAuthorized && typeof accountInfo.balance === 'number' ? accountInfo.balance : 0;
+  const demoBalance = accountInfo.isAuthorized && accountInfo.isVirtual ? liveBalance : 0;
+  const realBalance = accountInfo.isAuthorized && !accountInfo.isVirtual ? liveBalance : 0;
+
   const [pendingTrades, setPendingTrades] = useState<TradeRecord[]>([]);
   const pendingTradesRef = useRef<TradeRecord[]>([]);
-  pendingTradesRef.current = pendingTrades;
+  const syncPendingTrades = (updater: (prev: TradeRecord[]) => TradeRecord[]) => {
+    setPendingTrades((prev) => {
+      const next = updater(prev);
+      pendingTradesRef.current = next;
+      return next;
+    });
+  };
 
-  const [lastSettledToast, setLastSettledToast] = useState<{
-    id: string;
-    won: boolean;
-    text: string;
-  } | null>(null);
   const [tradeHistory, setTradeHistory] = useState<TradeRecord[]>(() => {
     try {
-      const saved = localStorage.getItem('deriv_recovery_trade_history');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          const seen = new Set<string>();
-          const uniqueTrades: TradeRecord[] = [];
-          for (const item of parsed) {
-            if (item && item.id && !seen.has(item.id)) {
-              seen.add(item.id);
-              uniqueTrades.push(item);
-            }
-          }
-          // Clean up localStorage immediately to eliminate stored duplicates
-          try {
-            localStorage.setItem('deriv_recovery_trade_history', JSON.stringify(uniqueTrades));
-          } catch {}
-          return uniqueTrades;
-        }
-      }
-    } catch {}
-    return [];
+      const raw = localStorage.getItem(REAL_HISTORY_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   });
+  const tradeHistoryRef = useRef(tradeHistory);
+  tradeHistoryRef.current = tradeHistory;
 
   const [sessionStats, setSessionStats] = useState(() => {
     try {
-      const saved = localStorage.getItem('deriv_recovery_session_stats');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed.totalTrades === 'number') return parsed;
-      }
-    } catch {}
-    return {
-      totalTrades: 0,
-      wins: 0,
-      losses: 0,
-      netProfit: 0,
-      consecutiveLosses: 0,
-      cumulativeLoss: 0,
-      peakDrawdown: 0,
-    };
+      const raw = localStorage.getItem(REAL_STATS_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed.totalTrades === 'number' ? parsed : EMPTY_STATS;
+    } catch {
+      return EMPTY_STATS;
+    }
   });
+  const sessionStatsRef = useRef(sessionStats);
+  sessionStatsRef.current = sessionStats;
 
-  // Persistent Watchlist state
+  const [activeTradeVisualizerRecord, setActiveTradeVisualizerRecord] = useState<TradeRecord | null>(null);
+  const [lastSettledTrade, setLastSettledTrade] = useState<TradeRecord | null>(null);
+  const [lastSettledToast, setLastSettledToast] = useState<{ id: string; won: boolean; text: string } | null>(null);
+  const clientCounterRef = useRef(0);
+
   const [watchlist, setWatchlist] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('deriv_watchlist');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {}
-    return ['R_100', '1HZ100V', 'R_75', '1HZ75V'];
+      const parsed = saved ? JSON.parse(saved) : null;
+      return Array.isArray(parsed) ? parsed : ['R_100', '1HZ100V', 'R_75', '1HZ75V'];
+    } catch {
+      return ['R_100', '1HZ100V', 'R_75', '1HZ75V'];
+    }
   });
-  const [isWatchlistOpen, setIsWatchlistOpen] = useState<boolean>(false);
-
-  // Deriv Account & Connection settings
-  const [accountInfo, setAccountInfo] = useState<DerivAccountInfo>(() =>
-    derivService.getAccountInfo()
-  );
-  const [isConnectModalOpen, setIsConnectModalOpen] = useState<boolean>(false);
-  const [isCashierOpen, setIsCashierOpen] = useState<boolean>(false);
-  const [isAuthOpen, setIsAuthOpen] = useState<boolean>(false);
-  const [activeTradeVisualizerRecord, setActiveTradeVisualizerRecord] = useState<TradeRecord | null>(null);
-  const [lastSettledTrade, setLastSettledTrade] = useState<TradeRecord | null>(null);
-  const isDispatchingTradeRef = useRef<boolean>(false);
-
-  // User Profile state (Login / Register / Profile)
+  const [isWatchlistOpen, setIsWatchlistOpen] = useState(false);
+  const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
+  const [isCashierOpen, setIsCashierOpen] = useState(false);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(() => {
     try {
       const saved = localStorage.getItem('deriv_user_profile');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {
-      id: 'usr_hoola',
-      email: 'hoolamohamed685@gmail.com',
-      fullName: 'Mohamed Hoola',
-      createdAt: Date.now(),
-      isLoggedIn: true,
-      tier: 'PRO',
-    };
-  });
-
-  const handleDepositSuccess = (amount: number, method: string) => {
-    if (accountMode === 'DEMO') {
-      setDemoBalance((prev) => {
-        const updated = Number((prev + amount).toFixed(2));
-        try {
-          localStorage.setItem('deriv_demo_balance', updated.toString());
-        } catch {}
-        return updated;
-      });
-    } else {
-      setRealBalance((prev) => {
-        const updated = Number((prev + amount).toFixed(2));
-        try {
-          localStorage.setItem('deriv_real_balance', updated.toString());
-        } catch {}
-        return updated;
-      });
-      setAccountInfo((prev) => ({
-        ...prev,
-        balance: Number(((prev.balance || 0) + amount).toFixed(2)),
-      }));
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
     }
-    setAutoRecoveryNotice(`✅ Deposit Successful: +$${amount.toFixed(2)} credited to ${accountMode} balance via ${method}.`);
-    setTimeout(() => setAutoRecoveryNotice(null), 4000);
-  };
-
-  const handleWithdrawSuccess = (amount: number, method: string) => {
-    if (accountMode === 'DEMO') {
-      setDemoBalance((prev) => {
-        const updated = Math.max(0, Number((prev - amount).toFixed(2)));
-        try {
-          localStorage.setItem('deriv_demo_balance', updated.toString());
-        } catch {}
-        return updated;
-      });
-    } else {
-      setRealBalance((prev) => {
-        const updated = Math.max(0, Number((prev - amount).toFixed(2)));
-        try {
-          localStorage.setItem('deriv_real_balance', updated.toString());
-        } catch {}
-        return updated;
-      });
-      setAccountInfo((prev) => ({
-        ...prev,
-        balance: Math.max(0, Number(((prev.balance || 0) - amount).toFixed(2))),
-      }));
-    }
-    setAutoRecoveryNotice(`✅ Withdrawal Processed: -$${amount.toFixed(2)} dispatched via ${method}.`);
-    setTimeout(() => setAutoRecoveryNotice(null), 4000);
-  };
-
-  const handleAuthSuccess = (profile: UserProfile) => {
-    setUserProfile(profile);
-    setAutoRecoveryNotice(`👋 Welcome, ${profile.fullName}! Authenticated successfully.`);
-    setTimeout(() => setAutoRecoveryNotice(null), 3500);
-  };
-
-  // Account Mode & Balance (DEMO vs REAL)
-  const [accountMode, setAccountMode] = useState<AccountMode>(() => {
-    try {
-      const saved = localStorage.getItem('deriv_account_mode');
-      if (saved === 'REAL' || saved === 'DEMO') return saved;
-    } catch {}
-    return 'DEMO';
   });
 
-  const [demoBalance, setDemoBalance] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('deriv_demo_balance');
-      if (saved) {
-        const parsed = parseFloat(saved);
-        if (!isNaN(parsed) && parsed > 0) return parsed;
-      }
-    } catch {}
-    return 10000.00; // Standard Deriv practice demo balance
-  });
-
-  const [realBalance, setRealBalance] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('deriv_real_balance');
-      if (saved) {
-        const parsed = parseFloat(saved);
-        if (!isNaN(parsed) && parsed >= 0) return parsed;
-      }
-    } catch {}
-    return 250.00; // Active starting balance for Real Live mode testing
-  });
-
-  const currentRunLossRef = useRef<number>(0);
-
-  // Global Active Bot tracking
   const [activeBot, setActiveBot] = useState<ActiveBotType>('NONE');
-  const activeBotRef = useRef<ActiveBotType>(activeBot);
-  activeBotRef.current = activeBot;
-
-  const handleStopAllBots = () => {
-    setActiveBot('NONE');
-    activeBotRef.current = 'NONE';
-    setAutoMatchesActive(false);
-    autoMatchesActiveRef.current = false;
-    setAutoNextTrade(false);
-    autoNextTradeRef.current = false;
-    setAutoRecoveryNotice('All automated bots stopped.');
-    setTimeout(() => setAutoRecoveryNotice(null), 3000);
+  const activeBotRef = useRef<ActiveBotType>('NONE');
+  const setActiveBotSafe = (bot: ActiveBotType) => {
+    activeBotRef.current = bot;
+    setActiveBot(bot);
   };
 
-  // Deep Scan & Auto-Matches Engine state
-  const [scanDepth, setScanDepth] = useState<number>(1000);
-  const [isDeepScanning, setIsDeepScanning] = useState<boolean>(false);
-  const [autoMatchesActive, setAutoMatchesActive] = useState<boolean>(false);
-  const autoMatchesActiveRef = useRef<boolean>(autoMatchesActive);
-  autoMatchesActiveRef.current = autoMatchesActive;
+  const [scanDepth, setScanDepth] = useState(1000);
+  const [isDeepScanning, setIsDeepScanning] = useState(false);
+  const [autoMatchesActive, setAutoMatchesActive] = useState(false);
+  const autoMatchesActiveRef = useRef(false);
+  const [autoNextTrade, setAutoNextTrade] = useState(false);
+  const autoNextTradeRef = useRef(false);
+  const [autoRecoveryNotice, setAutoRecoveryNotice] = useState<string | null>(null);
+  const [isSafetyModalOpen, setIsSafetyModalOpen] = useState(false);
+  const [recoveryMode, setRecoveryMode] = useState<'X2_SUPER_RECOVERY' | 'X4_SUPER_RECOVERY'>('X2_SUPER_RECOVERY');
+  const autoDispatchLockRef = useRef(false);
 
   const [autoMatchesConfig, setAutoMatchesConfig] = useState<AutoMatchesConfig>(() => {
     try {
@@ -311,1005 +218,563 @@ export default function App() {
     } catch {}
     return {
       market: '1HZ10V',
-      stake: 0.35, // Initial Amount from DBot XML
-      winAmount: 0.35, // Win Amount from DBot XML
-      expectedProfit: 20.0, // Expected Profit target
-      maxAcceptableLoss: 50.0, // Max Acceptable Loss stop limit
-      nextTradeCondition: 'MARTINGALE',
-      martingaleFactor: 1.15,
-      restartOnError: true, // RESTARTONERROR: TRUE
+      stake: 0.35,
+      winAmount: 0.35,
+      expectedProfit: 20,
+      maxAcceptableLoss: 50,
+      nextTradeCondition: 'RESET_ON_WIN',
+      martingaleFactor: 1,
+      restartOnError: true,
       executionSpeed: 'FAST',
-      targetStrategy: 'REPEAT_ENTRY',
+      targetStrategy: 'MARKOV_TRANSITION',
     };
   });
-  const autoMatchesConfigRef = useRef<AutoMatchesConfig>(autoMatchesConfig);
+  const autoMatchesConfigRef = useRef(autoMatchesConfig);
   autoMatchesConfigRef.current = autoMatchesConfig;
 
-  const [isSafetyModalOpen, setIsSafetyModalOpen] = useState<boolean>(false);
-
-  const [recoveryMode, setRecoveryMode] = useState<
-    'X2_SUPER_RECOVERY' | 'X4_SUPER_RECOVERY'
-  >('X2_SUPER_RECOVERY');
-
-  // Automatic Next Trade state on loss
-  const [autoNextTrade, setAutoNextTrade] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('deriv_auto_next_trade') === 'true';
-    } catch {
-      return false;
-    }
-  });
-  const autoNextTradeRef = useRef<boolean>(autoNextTrade);
-  const [autoRecoveryNotice, setAutoRecoveryNotice] = useState<string | null>(null);
-
   const autoRecoveryConfigRef = useRef<RiskConfig>({
-    baseStake: 1.0,
+    baseStake: 1,
     payoutRate: 1.95,
     recoveryStrategy: 'X2_SUPER_RECOVERY',
-    takeProfit: 50.0,
-    stopLoss: 100.0,
-    maxConsecutiveLosses: 6,
+    takeProfit: 50,
+    stopLoss: 100,
+    maxConsecutiveLosses: 2,
     contractType: 'DIFFERS',
     profitLockEnabled: true,
-    profitLockTarget: 50.0,
+    profitLockTarget: 50,
   });
 
-  const handleToggleAutoNextTrade = (enabled: boolean) => {
-    setAutoNextTrade(enabled);
-    autoNextTradeRef.current = enabled;
-    try {
-      localStorage.setItem('deriv_auto_next_trade', String(enabled));
-    } catch {}
-    if (enabled) {
-      setAutoRecoveryNotice('⚡ Automatic Next Trade Armed: Upon loss, recovery trade will auto-execute on next tick.');
-    } else {
-      setAutoRecoveryNotice('Automatic Next Trade Paused (Manual execution mode active).');
-      setTimeout(() => setAutoRecoveryNotice(null), 3000);
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('OVERVIEW');
+
+  const showNotice = useCallback((message: string, timeout = 4000) => {
+    setAutoRecoveryNotice(message);
+    if (timeout > 0) setTimeout(() => setAutoRecoveryNotice((current) => current === message ? null : current), timeout);
+  }, []);
+
+  const handleStopAllBots = useCallback(() => {
+    setActiveBotSafe('NONE');
+    setAutoMatchesActive(false);
+    autoMatchesActiveRef.current = false;
+    setAutoNextTrade(false);
+    autoNextTradeRef.current = false;
+    autoDispatchLockRef.current = false;
+    showNotice('Automated trading stopped. Existing Deriv contracts continue to settlement.', 3000);
+  }, [showNotice]);
+
+  const handlePlaceTrade = useCallback((tradeData: TradeInput): boolean => {
+    const account = accountInfoRef.current;
+    if (!connected || !account.isAuthorized) {
+      setIsConnectModalOpen(true);
+      showNotice('Connect and authorize a Deriv account before placing a real contract.');
+      return false;
     }
-  };
 
-  const handleToggleAutoMatches = (active: boolean) => {
-    setAutoMatchesActive(active);
-    autoMatchesActiveRef.current = active;
-    setActiveBot(active ? 'AUTO_MATCHES' : 'NONE');
-    activeBotRef.current = active ? 'AUTO_MATCHES' : 'NONE';
-    if (active) {
-      setTimeout(() => {
-        if (handleSimulateTradeRef.current && autoMatchesActiveRef.current) {
-          const cfg = autoMatchesConfigRef.current;
-          const target = cfg.customTargetDigit !== undefined ? cfg.customTargetDigit : lastDigit;
-          handleSimulateTradeRef.current({
-            contractType: 'MATCHES',
-            targetValue: target,
-            stake: cfg.stake || 0.35,
-            symbol: currentSymbol,
-            payout: 8.342857,
-            entryDigit: lastDigit,
-            entryPrice: currentPrice,
-          });
-        }
-      }, 50);
+    const symbol = tradeData.symbol || currentSymbolRef.current;
+    const marketData = marketTickDataRef.current[symbol];
+    if (!marketData?.prices.length || !marketData?.digits.length) {
+      derivService.requestTickHistory(symbol, 500);
+      showNotice(`Waiting for real Deriv ticks for ${symbol}; no order was sent.`);
+      return false;
     }
-  };
 
-  const handleToggleStrongestBot = (running: boolean) => {
-    setActiveBot(running ? 'STRONGEST_WIN' : 'NONE');
-    activeBotRef.current = running ? 'STRONGEST_WIN' : 'NONE';
-    if (running) {
-      setTimeout(() => {
-        if (handleSimulateTradeRef.current && activeBotRef.current === 'STRONGEST_WIN') {
-          const list = Object.values(marketAnalysesRef.current || {}) as MarketAnalysis[];
-          const sorted = [...list].sort((a, b) => b.winScore - a.winScore);
-          const top = sorted[0];
-          if (top) {
-            handleSimulateTradeRef.current({
-              symbol: top.symbol,
-              contractType: top.recommendedContract,
-              targetValue: top.recommendedTarget,
-              stake: 1.0,
-            });
-          }
-        }
-      }, 50);
+    const stake = Number(tradeData.stake);
+    if (!Number.isFinite(stake) || stake <= 0) {
+      showNotice('Stake must be greater than zero.');
+      return false;
     }
-  };
 
-  const handleToggleSuperRecoveryBot = (running: boolean) => {
-    handleToggleAutoNextTrade(running);
-    setActiveBot(running ? 'SUPER_RECOVERY' : 'NONE');
-    activeBotRef.current = running ? 'SUPER_RECOVERY' : 'NONE';
-    if (running) {
-      setTimeout(() => {
-        if (handleSimulateTradeRef.current && activeBotRef.current === 'SUPER_RECOVERY') {
-          const cfg = autoRecoveryConfigRef.current;
-          handleSimulateTradeRef.current({
-            symbol: currentSymbol,
-            contractType: cfg.contractType || 'DIFFERS',
-            targetValue: 5,
-            stake: cfg.baseStake || 1.0,
-          });
-        }
-      }, 50);
-    }
-  };
+    const entryPrice = tradeData.entryPrice ?? marketData.prices[marketData.prices.length - 1];
+    const entryDigit = tradeData.entryDigit ?? marketData.digits[marketData.digits.length - 1];
+    clientCounterRef.current += 1;
+    const clientTradeId = makeClientTradeId(clientCounterRef.current);
 
-  const handleToggleBulkBot = (running: boolean) => {
-    setActiveBot(running ? 'BULK_AUTO' : 'NONE');
-    activeBotRef.current = running ? 'BULK_AUTO' : 'NONE';
-  };
+    const pending: TradeRecord = {
+      id: clientTradeId,
+      timestamp: Date.now(),
+      symbol,
+      contractType: tradeData.contractType,
+      targetValue: tradeData.targetValue,
+      entryPrice,
+      entryDigit,
+      stake,
+      payout: 0,
+      status: 'PENDING',
+      profit: 0,
+      recoveryStep: sessionStatsRef.current.consecutiveLosses + 1,
+    };
 
-  const handleRecoveryConfigChange = (newConfig: RiskConfig) => {
-    autoRecoveryConfigRef.current = newConfig;
-  };
+    syncPendingTrades((prev) => [...prev, pending]);
+    setActiveTradeVisualizerRecord(pending);
 
-  const handleSimulateTradeRef = useRef<
-    ((tradeData: { contractType: any; targetValue: any; stake: number; symbol?: string; entryPrice?: number; entryDigit?: number; payout?: number }) => void) | null
-  >(null);
-
-  // Active view tab
-  const [activeTab, setActiveTab] = useState<
-    'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'
-  >('OVERVIEW');
-
-  // Multi-market real tick cache for scanner
-  const marketTickDataRef = useRef<Record<string, { prices: number[]; digits: number[] }>>({});
-  if (Object.keys(marketTickDataRef.current).length === 0) {
-    POPULAR_SYMBOLS.forEach((sym) => {
-      const p = derivService.generateRealisticHistory(sym.symbol, 80);
-      marketTickDataRef.current[sym.symbol] = {
-        prices: p,
-        digits: p.map((val) => derivService.extractLastDigit(val, sym.symbol)),
-      };
+    const requestSent = derivService.placeContract({
+      clientTradeId,
+      contract_type: toDerivContractType(tradeData.contractType),
+      symbol,
+      amount: stake,
+      duration: 1,
+      duration_unit: 't',
+      barrier: isDigitContract(tradeData.contractType) ? tradeData.targetValue : undefined,
     });
-  }
 
-  // Save watchlist to localStorage whenever it changes
-  const handleToggleWatchlist = (symbol: string) => {
-    setWatchlist((prev) => {
-      const next = prev.includes(symbol)
-        ? prev.filter((s) => s !== symbol)
-        : [...prev, symbol];
-      try {
-        localStorage.setItem('deriv_watchlist', JSON.stringify(next));
-      } catch {}
-      return next;
-    });
-  };
+    if (!requestSent) {
+      syncPendingTrades((prev) => prev.filter((trade) => trade.id !== clientTradeId));
+      setActiveTradeVisualizerRecord(null);
+      return false;
+    }
 
-  // Trigger Deep Scan across all markets with requested depth (up to 2000 ticks)
-  const handleTriggerDeepScan = (depth: number) => {
-    setIsDeepScanning(true);
-    setScanDepth(depth);
+    playOrderDispatchedSound();
+    return true;
+  }, [connected, showNotice]);
 
-    POPULAR_SYMBOLS.forEach((sym, idx) => {
-      setTimeout(() => {
-        derivService.requestTickHistory(sym.symbol, depth);
-        if (idx === POPULAR_SYMBOLS.length - 1) {
-          setTimeout(() => setIsDeepScanning(false), 800);
-        }
-      }, idx * 180);
-    });
-  };
+  const handlePlaceTradeRef = useRef(handlePlaceTrade);
+  handlePlaceTradeRef.current = handlePlaceTrade;
 
-  // 1. Deriv WebSocket Lifecycle & Listeners
+  const persistSettlement = useCallback((trade: TradeRecord) => {
+    const history = [trade, ...tradeHistoryRef.current.filter((item) => item.id !== trade.id)].slice(0, 1000);
+    tradeHistoryRef.current = history;
+    setTradeHistory(history);
+    try { localStorage.setItem(REAL_HISTORY_KEY, JSON.stringify(history)); } catch {}
+
+    const prev = sessionStatsRef.current;
+    const won = trade.status === 'WON';
+    const nextCumulativeLoss = won ? 0 : Number((prev.cumulativeLoss + Math.abs(trade.profit || trade.stake)).toFixed(2));
+    const nextStats = {
+      totalTrades: prev.totalTrades + 1,
+      wins: prev.wins + (won ? 1 : 0),
+      losses: prev.losses + (won ? 0 : 1),
+      netProfit: Number((prev.netProfit + trade.profit).toFixed(2)),
+      consecutiveLosses: won ? 0 : prev.consecutiveLosses + 1,
+      cumulativeLoss: nextCumulativeLoss,
+      peakDrawdown: Math.max(prev.peakDrawdown, nextCumulativeLoss),
+    };
+    sessionStatsRef.current = nextStats;
+    setSessionStats(nextStats);
+    try { localStorage.setItem(REAL_STATS_KEY, JSON.stringify(nextStats)); } catch {}
+    return nextStats;
+  }, []);
+
   useEffect(() => {
     derivService.connect();
 
     const unsubscribe = derivService.addListener((data: any) => {
-      // Connection Status
       if (data.msg_type === 'connection_status') {
-        setConnected(data.connected);
+        setConnected(Boolean(data.connected));
         if (data.connected) {
-          // Re-subscribe to current symbol
-          derivService.requestTickHistory(currentSymbol, scanDepth);
-          derivService.subscribeTicks(currentSymbol);
+          derivService.subscribeMultipleTicks(POPULAR_SYMBOLS.map((item) => item.symbol));
+          POPULAR_SYMBOLS.forEach((item, index) => {
+            setTimeout(() => derivService.requestTickHistory(item.symbol, 500), index * 80);
+          });
+        } else {
+          autoDispatchLockRef.current = false;
         }
+        return;
       }
 
-      // Latency Update
       if (data.msg_type === 'latency_update') {
-        setLatency(data.latency);
+        setLatency(Number(data.latency || 0));
+        return;
       }
 
-      // Account Update (Authorization / Balance)
       if (data.msg_type === 'account_update' && data.account) {
         setAccountInfo(data.account);
-        if (typeof data.account.balance === 'number' && data.account.balance > 0) {
-          setRealBalance(data.account.balance);
-          try {
-            localStorage.setItem('deriv_real_balance', data.account.balance.toString());
-          } catch {}
-        }
+        accountInfoRef.current = data.account;
+        return;
       }
 
-      // Tick History Response (100% Real tick history from Deriv)
       if (data.msg_type === 'history' && data.history) {
-        const symbol = data.echo_req?.ticks_history || currentSymbol;
-        const rawPrices = data.history.prices || [];
-        const symbolPip = derivService.getPipSize(symbol);
-
-        const extractedDigits = rawPrices.map((p: number) =>
-          derivService.extractLastDigit(p, symbol)
-        );
-
-        marketTickDataRef.current[symbol] = {
-          prices: rawPrices,
-          digits: extractedDigits,
-        };
-
-        const displayName =
-          POPULAR_SYMBOLS.find((s) => s.symbol === symbol)?.name || symbol;
-
-        const analysis = evaluateMarketStrength(
-          symbol,
-          displayName,
-          rawPrices,
-          extractedDigits
-        );
-
+        const symbol = data.echo_req?.ticks_history || currentSymbolRef.current;
+        const rawPrices = (data.history.prices || []).map(Number).filter(Number.isFinite);
+        const extractedDigits = rawPrices.map((price: number) => derivService.extractLastDigit(price, symbol));
+        marketTickDataRef.current[symbol] = { prices: rawPrices, digits: extractedDigits };
+        const displayName = POPULAR_SYMBOLS.find((item) => item.symbol === symbol)?.name || symbol;
+        const analysis = evaluateMarketStrength(symbol, displayName, rawPrices, extractedDigits);
         setMarketAnalyses((prev) => ({ ...prev, [symbol]: analysis }));
 
-        if (symbol === currentSymbol) {
+        if (symbol === currentSymbolRef.current) {
           setPrices(rawPrices);
           setDigits(extractedDigits);
-          if (rawPrices.length > 0) {
-            const latestPrice = rawPrices[rawPrices.length - 1];
-            setCurrentPrice(latestPrice);
+          if (rawPrices.length) {
+            setCurrentPrice(rawPrices[rawPrices.length - 1]);
             setLastDigit(extractedDigits[extractedDigits.length - 1]);
-            setPip(symbolPip);
+            setPip(derivService.getPipSize(symbol));
           }
         }
+
+        historyPendingRef.current.delete(symbol);
+        if (historyPendingRef.current.size === 0) setIsDeepScanning(false);
+        return;
       }
 
-      // Real-Time Live Incoming Tick
       if (data.msg_type === 'tick' && data.tick) {
-        const tick = data.tick;
-        const tickSymbol = tick.symbol;
-        const tickQuote = tick.quote;
-        const symbolPip = derivService.getPipSize(tickSymbol);
-        const tickDigit = derivService.extractLastDigit(tickQuote, tickSymbol);
+        const symbol = data.tick.symbol;
+        const quote = Number(data.tick.quote);
+        if (!symbol || !Number.isFinite(quote)) return;
+        const tickDigit = derivService.extractLastDigit(quote, symbol);
+        const previous = marketTickDataRef.current[symbol] || { prices: [], digits: [] };
+        const updatedPrices = [...previous.prices, quote].slice(-2000);
+        const updatedDigits = [...previous.digits, tickDigit].slice(-2000);
+        marketTickDataRef.current[symbol] = { prices: updatedPrices, digits: updatedDigits };
+        setTotalTicksReceived((count) => count + 1);
 
-        setTotalTicksReceived((prev) => prev + 1);
+        const displayName = POPULAR_SYMBOLS.find((item) => item.symbol === symbol)?.name || symbol;
+        const analysis = evaluateMarketStrength(symbol, displayName, updatedPrices, updatedDigits);
+        marketAnalysesRef.current = { ...marketAnalysesRef.current, [symbol]: analysis };
+        setMarketAnalyses((prev) => ({ ...prev, [symbol]: analysis }));
 
-        // Update cache for this symbol
-        const prevData = marketTickDataRef.current[tickSymbol] || { prices: [], digits: [] };
-        const updatedPrices = [...prevData.prices, tickQuote].slice(-1000);
-        const updatedDigits = [...prevData.digits, tickDigit].slice(-1000);
-        marketTickDataRef.current[tickSymbol] = {
-          prices: updatedPrices,
-          digits: updatedDigits,
-        };
-
-        const displayName =
-          POPULAR_SYMBOLS.find((s) => s.symbol === tickSymbol)?.name || tickSymbol;
-
-        const updatedAnalysis = evaluateMarketStrength(
-          tickSymbol,
-          displayName,
-          updatedPrices,
-          updatedDigits
-        );
-
-        setMarketAnalyses((prev) => ({ ...prev, [tickSymbol]: updatedAnalysis }));
-
-        // If this is the currently active symbol
-        if (tickSymbol === currentSymbol) {
-          setCurrentPrice(tickQuote);
-          setLastDigit(tickDigit);
-          setPip(symbolPip);
+        if (symbol === currentSymbolRef.current) {
           setPrices(updatedPrices);
           setDigits(updatedDigits);
+          setCurrentPrice(quote);
+          setLastDigit(tickDigit);
+          setPip(derivService.getPipSize(symbol));
         }
 
-        // Settle any pending trades for THIS tickSymbol across all markets!
-        setPendingTrades((currentPending) => {
-          if (currentPending.length === 0) return currentPending;
+        const account = accountInfoRef.current;
+        if (!account.isAuthorized || !derivService.getConnectionState().connected) return;
+        const hasPending = pendingTradesRef.current.some((trade) => trade.status === 'PENDING');
+        if (hasPending || autoDispatchLockRef.current) return;
 
-          const toSettle = currentPending.filter(
-            (trade) => trade.symbol === tickSymbol && trade.status === 'PENDING'
-          );
-
-          if (toSettle.length === 0) return currentPending;
-
-          const remainingPending = currentPending.filter(
-            (trade) => !(trade.symbol === tickSymbol && trade.status === 'PENDING')
-          );
-
-          const newlySettled: TradeRecord[] = [];
-          let autoRecoveryCandidate: {
-            contractType: any;
-            targetValue: any;
-            symbol: string;
-            payout: number;
-            cumulativeLoss: number;
-            consecutiveLosses: number;
-          } | null = null;
-          let hadWin = false;
-
-          toSettle.forEach((trade) => {
-            let won = false;
-
-            switch (trade.contractType) {
-              case 'MATCHES':
-                won = tickDigit === Number(trade.targetValue);
-                break;
-              case 'DIFFERS':
-                won = tickDigit !== Number(trade.targetValue);
-                break;
-              case 'OVER':
-                won = tickDigit > Number(trade.targetValue);
-                break;
-              case 'UNDER':
-                won = tickDigit < Number(trade.targetValue);
-                break;
-              case 'RISE':
-                won = tickQuote > trade.entryPrice;
-                break;
-              case 'FALL':
-                won = tickQuote < trade.entryPrice;
-                break;
-            }
-
-            if (won) hadWin = true;
-
-            const netProfit = won
-              ? Number((trade.stake * (trade.payout > 1.5 ? trade.payout - 1 : trade.payout)).toFixed(2))
-              : -trade.stake;
-
-            // Return stake + profit upon win
-            if (won) {
-              if (accountMode === 'REAL') {
-                setRealBalance((prev) => {
-                  const updated = Number((prev + trade.stake + netProfit).toFixed(2));
-                  try {
-                    localStorage.setItem('deriv_real_balance', updated.toString());
-                  } catch {}
-                  return updated;
-                });
-                setAccountInfo((prev) => ({
-                  ...prev,
-                  balance: Number(((prev.balance || 0) + trade.stake + netProfit).toFixed(2)),
-                }));
-              } else {
-                setDemoBalance((prev) => {
-                  const updated = Number((prev + trade.stake + netProfit).toFixed(2));
-                  try {
-                    localStorage.setItem('deriv_demo_balance', updated.toString());
-                  } catch {}
-                  return updated;
-                });
-              }
-            }
-
-            newlySettled.push({
-              ...trade,
-              exitPrice: tickQuote,
-              exitDigit: tickDigit,
-              status: won ? 'WON' : 'LOST',
-              profit: netProfit,
-            });
-
-            const toastId = String(Date.now());
-            if (won) {
-              setLastSettledToast({
-                id: toastId,
-                won: true,
-                text: `🎉 WON +$${netProfit.toFixed(2)} USD! Digit #${trade.targetValue} matched on ${tickSymbol}!`,
-              });
-              currentRunLossRef.current = 0;
-            } else {
-              setLastSettledToast({
-                id: toastId,
-                won: false,
-                text: `❌ Trade Settled: -$${trade.stake.toFixed(2)} USD (Exit Digit was ${tickDigit} != Target #${trade.targetValue})`,
-              });
-              currentRunLossRef.current += trade.stake;
-            }
-            setTimeout(() => {
-              setLastSettledToast((curr) => (curr?.id === toastId ? null : curr));
-            }, 3000);
-
-            // Update session recovery statistics
-            setSessionStats((prevStats) => {
-              const newTotal = prevStats.totalTrades + 1;
-              const newWins = won ? prevStats.wins + 1 : prevStats.wins;
-              const newLosses = !won ? prevStats.losses + 1 : prevStats.losses;
-              const newProfit = Number((prevStats.netProfit + netProfit).toFixed(2));
-              const newConsecLosses = won ? 0 : prevStats.consecutiveLosses + 1;
-              const newCumulativeLoss = won
-                ? 0
-                : Number((prevStats.cumulativeLoss + trade.stake).toFixed(2));
-              const peakDrawdown = Math.max(
-                prevStats.peakDrawdown,
-                newCumulativeLoss
-              );
-
-              const nextStats = {
-                totalTrades: newTotal,
-                wins: newWins,
-                losses: newLosses,
-                netProfit: newProfit,
-                consecutiveLosses: newConsecLosses,
-                cumulativeLoss: newCumulativeLoss,
-                peakDrawdown,
-              };
-              try {
-                localStorage.setItem('deriv_recovery_session_stats', JSON.stringify(nextStats));
-              } catch {}
-
-              // Profit Lock Check: automatically stop bot and pause recovery when predefined daily profit target reached
-              const cfg = autoRecoveryConfigRef.current;
-              const isProfitLockEnabled = cfg.profitLockEnabled ?? true;
-              const profitLockTarget = cfg.profitLockTarget ?? cfg.takeProfit;
-              if (isProfitLockEnabled && newProfit >= profitLockTarget) {
-                setAutoNextTrade(false);
-                autoNextTradeRef.current = false;
-                setActiveBot('NONE');
-                setAutoMatchesActive(false);
-                setAutoRecoveryNotice(
-                  `🔒 Profit Lock Activated: Predefined daily profit target of $${profitLockTarget.toFixed(2)} reached (+${newProfit >= 0 ? '$' : '-$'}${Math.abs(newProfit).toFixed(2)})! Bot automatically stopped and recovery paused to prevent over-trading during high market volatility.`
-                );
-                // Pause recovery
-                autoRecoveryCandidate = null;
-              } else if (!won) {
-                // If this was a loss, prepare auto recovery payload only if profit lock is not active
-                autoRecoveryCandidate = {
-                  contractType: trade.contractType,
-                  targetValue: trade.targetValue,
-                  symbol: trade.symbol,
-                  payout: trade.payout,
-                  cumulativeLoss: newCumulativeLoss,
-                  consecutiveLosses: newConsecLosses,
-                };
-              }
-
-              return nextStats;
-            });
-          });
-
-          setTradeHistory((prevHistory) => {
-            const seen = new Set<string>();
-            const merged = [...prevHistory, ...newlySettled];
-            const nextHistory: TradeRecord[] = [];
-            for (const t of merged) {
-              if (t && t.id && !seen.has(t.id)) {
-                seen.add(t.id);
-                nextHistory.push(t);
-              }
-            }
-            const trimmed = nextHistory.slice(-1000);
-            try {
-              localStorage.setItem('deriv_recovery_trade_history', JSON.stringify(trimmed));
-            } catch {}
-            return trimmed;
-          });
-
-          if (newlySettled.length > 0) {
-            const latest = newlySettled[newlySettled.length - 1];
-            setLastSettledTrade(latest);
-            setActiveTradeVisualizerRecord(null); // The running contract has completed
-            if (latest.status === 'WON') {
-              playWinSound();
-            } else {
-              playLossSound();
-            }
+        if (autoMatchesActiveRef.current && symbol === currentSymbolRef.current) {
+          const cfg = autoMatchesConfigRef.current;
+          const currentStats = sessionStatsRef.current;
+          if (currentStats.netProfit >= (cfg.expectedProfit ?? 20)) {
+            handleStopAllBots();
+            showNotice('Configured profit target reached. Auto-Matches stopped.');
+            return;
+          }
+          if (currentStats.cumulativeLoss >= (cfg.maxAcceptableLoss ?? 50)) {
+            handleStopAllBots();
+            showNotice('Configured loss limit reached. Auto-Matches stopped.');
+            return;
           }
 
-          // If Automatic Next Trade is enabled and a loss just settled, dispatch next recovery trade
-          if (autoRecoveryCandidate && autoNextTradeRef.current) {
-            const candidate = autoRecoveryCandidate;
-            const cfg = autoRecoveryConfigRef.current;
+          const currentAnalysis = marketAnalysesRef.current[symbol];
+          if (!currentAnalysis) return;
+          const signal = findBestAutoMatchesTarget(
+            symbol,
+            currentAnalysis.displayName,
+            updatedDigits,
+            currentAnalysis.digitStats,
+            tickDigit,
+          );
 
-            // Circuit breaker checks
-            if (candidate.cumulativeLoss >= cfg.stopLoss) {
-              setAutoRecoveryNotice(
-                `🛑 Circuit Breaker: Stop Loss ($${cfg.stopLoss.toFixed(2)}) reached. Automatic Next Trade halted.`
-              );
-              setAutoNextTrade(false);
-              autoNextTradeRef.current = false;
-            } else if (candidate.consecutiveLosses >= cfg.maxConsecutiveLosses) {
-              setAutoRecoveryNotice(
-                `🛑 Circuit Breaker: Max consecutive losses (${cfg.maxConsecutiveLosses}) reached. Automatic Next Trade halted.`
-              );
-              setAutoNextTrade(false);
-              autoNextTradeRef.current = false;
-            } else {
-              const nextStake = calculateNextStake(
-                cfg.baseStake,
-                candidate.cumulativeLoss,
-                candidate.consecutiveLosses,
-                candidate.payout,
-                cfg.recoveryStrategy
-              );
-              const nextStep = candidate.consecutiveLosses + 1;
+          let targetDigit = tickDigit;
+          if (cfg.customTargetDigit !== undefined) targetDigit = cfg.customTargetDigit;
+          else if (cfg.targetStrategy === 'MARKOV_TRANSITION') {
+            if (!signal.isTriggerReady) return;
+            targetDigit = signal.targetDigit;
+          } else if (cfg.targetStrategy === 'HOTTEST_CLUSTER') targetDigit = currentAnalysis.hotDigit;
+          else if (cfg.targetStrategy === 'REPEAT_ENTRY') targetDigit = tickDigit;
 
-              setAutoRecoveryNotice(
-                `⚡ Auto Next Trade: Loss detected on ${candidate.symbol}. Auto-placed recovery Step #${nextStep} with $${nextStake.toFixed(2)} stake on incoming tick!`
-              );
-
-              // Queue next trade with same parameters on new tick
-              setTimeout(() => {
-                if (handleSimulateTradeRef.current) {
-                  handleSimulateTradeRef.current({
-                    contractType: candidate.contractType,
-                    targetValue: candidate.targetValue,
-                    stake: nextStake,
-                    symbol: candidate.symbol,
-                  });
-                }
-              }, 100);
-            }
-          } else if (hadWin && sessionStats.consecutiveLosses > 0) {
-            setAutoRecoveryNotice(
-              `🎉 Super Recovery Success! Trade won on ${tickSymbol}—drawdown recouped and profit locked.`
-            );
-          }
-
-          return remainingPending;
-        });
-
-        // 100% Real Live Deriv Stream Auto-Matches Execution
-        if (
-          autoMatchesActiveRef.current &&
-          tickSymbol === currentSymbol
-        ) {
-          setPendingTrades((latestPending) => {
-            const hasPendingTrade = latestPending.some(
-              (t) => t.symbol === currentSymbol && t.status === 'PENDING'
-            );
-
-            if (!hasPendingTrade && !isDispatchingTradeRef.current) {
-              isDispatchingTradeRef.current = true;
-              const cfg = autoMatchesConfigRef.current;
-              const rCfg = autoRecoveryConfigRef.current;
-
-              const expectedProfitTarget = cfg.expectedProfit ?? rCfg.profitLockTarget ?? 20.0;
-              const maxLossLimit = cfg.maxAcceptableLoss ?? rCfg.stopLoss ?? 50.0;
-
-              // Expected Profit Target Guard
-              if (sessionStats.netProfit >= expectedProfitTarget) {
-                isDispatchingTradeRef.current = false;
-                setAutoMatchesActive(false);
-                autoMatchesActiveRef.current = false;
-                setActiveBot('NONE');
-                setAutoRecoveryNotice(
-                  `🎉 Expected Profit Target Reached: +$${sessionStats.netProfit.toFixed(2)} achieved! Auto-Matches DBot halted with profit secured.`
-                );
-                return latestPending;
-              }
-
-              // Max Acceptable Loss Stop Loss Circuit Breaker
-              if (sessionStats.cumulativeLoss >= maxLossLimit) {
-                isDispatchingTradeRef.current = false;
-                setAutoMatchesActive(false);
-                autoMatchesActiveRef.current = false;
-                setActiveBot('NONE');
-                setAutoRecoveryNotice(
-                  `🛑 Max Acceptable Loss: -$${sessionStats.cumulativeLoss.toFixed(2)} reached limit of $${maxLossLimit.toFixed(2)}. Bot halted to protect capital.`
-                );
-                return latestPending;
-              }
-
-              // Determine target digit based on strategy
-              let targetDigit = tickDigit;
-              if (cfg.customTargetDigit !== undefined) {
-                targetDigit = cfg.customTargetDigit;
-              } else if (cfg.targetStrategy === 'REPEAT_ENTRY') {
-                // Exact strategy matching screenshot: Entry spot last digit is targeted for next tick (1->1, 9->9, 6->6)
-                targetDigit = tickDigit;
-              } else if (cfg.targetStrategy === 'MARKOV_TRANSITION') {
-                const analysis = marketAnalyses[currentSymbol];
-                targetDigit =
-                  analysis?.recommendedTarget !== undefined
-                    ? Number(analysis.recommendedTarget)
-                    : tickDigit;
-              } else if (cfg.targetStrategy === 'HOTTEST_CLUSTER') {
-                const analysis = marketAnalyses[currentSymbol];
-                targetDigit =
-                  analysis?.hotDigit !== undefined ? analysis.hotDigit : tickDigit;
-              }
-
-              // Calculate Next Stake based on DBot XML Next Trade Condition
-              let tradeStake = cfg.stake || 0.35;
-              if (sessionStats.consecutiveLosses > 0) {
-                if (cfg.nextTradeCondition === 'SAME_LOSS_RECOVERY') {
-                  const targetWinProfit = cfg.winAmount || cfg.stake || 0.35;
-                  tradeStake = Number(
-                    Math.min(
-                      maxLossLimit,
-                      Math.max(cfg.stake || 0.35, (sessionStats.cumulativeLoss + targetWinProfit) / 8.5)
-                    ).toFixed(2)
-                  );
-                } else if (cfg.nextTradeCondition === 'RESET_ON_WIN') {
-                  tradeStake = cfg.stake || 0.35;
-                } else {
-                  // Default: Martingale progression
-                  const factor = cfg.martingaleFactor || 1.15;
-                  tradeStake = Number(
-                    Math.min(
-                      maxLossLimit,
-                      (cfg.stake || 0.35) * Math.pow(factor, sessionStats.consecutiveLosses)
-                    ).toFixed(2)
-                  );
-                }
-              } else {
-                tradeStake = cfg.winAmount || cfg.stake || 0.35;
-              }
-
-              const paceDelay = cfg.executionSpeed === 'FAST' ? 120 : 500;
-              setTimeout(() => {
-                isDispatchingTradeRef.current = false;
-                try {
-                  if (handleSimulateTradeRef.current && autoMatchesActiveRef.current) {
-                    handleSimulateTradeRef.current({
-                      contractType: 'MATCHES',
-                      targetValue: targetDigit,
-                      stake: tradeStake,
-                      symbol: currentSymbol,
-                      entryPrice: tickQuote,
-                      entryDigit: tickDigit,
-                      payout: 8.342857, // 0.35 stake -> +2.57 USD net profit on win (~834% payout)
-                    });
-                  }
-                } catch (tradeErr) {
-                  console.error('Trade dispatch error:', tradeErr);
-                  if (cfg.restartOnError) {
-                    console.log('RESTARTONERROR enabled: continuing trade stream on next tick.');
-                  }
-                }
-              }, paceDelay);
-            }
-
-            return latestPending;
+          const stake = cfg.stake || 0.35;
+          autoDispatchLockRef.current = true;
+          const ok = handlePlaceTradeRef.current({
+            contractType: 'MATCHES',
+            targetValue: targetDigit,
+            stake,
+            symbol,
+            entryPrice: quote,
+            entryDigit: tickDigit,
           });
+          if (!ok) autoDispatchLockRef.current = false;
+          return;
         }
 
-        // 2. Strongest Market Win Bot Execution Loop
         if (activeBotRef.current === 'STRONGEST_WIN') {
-          setPendingTrades((latestPending) => {
-            const hasPending = latestPending.some((t) => t.status === 'PENDING');
-            if (!hasPending && !isDispatchingTradeRef.current) {
-              isDispatchingTradeRef.current = true;
-              const list = Object.values(marketAnalysesRef.current || {}) as MarketAnalysis[];
-              const sorted = [...list].sort((a, b) => b.winScore - a.winScore);
-              const top = sorted[0];
-              if (top) {
-                setTimeout(() => {
-                  isDispatchingTradeRef.current = false;
-                  if (handleSimulateTradeRef.current && activeBotRef.current === 'STRONGEST_WIN') {
-                    handleSimulateTradeRef.current({
-                      symbol: top.symbol,
-                      contractType: top.recommendedContract,
-                      targetValue: top.recommendedTarget,
-                      stake: 1.0,
-                    });
-                  }
-                }, 150);
-              } else {
-                isDispatchingTradeRef.current = false;
-              }
-            }
-            return latestPending;
+          const candidates = Object.values(marketAnalysesRef.current)
+            .filter((item) => (marketTickDataRef.current[item.symbol]?.digits.length || 0) >= 30)
+            .sort((a, b) => b.winScore - a.winScore);
+          const strongest = candidates[0];
+          if (!strongest || strongest.winScore < 45) return;
+          autoDispatchLockRef.current = true;
+          const ok = handlePlaceTradeRef.current({
+            contractType: strongest.recommendedContract,
+            targetValue: strongest.recommendedTarget,
+            stake: 1,
+            symbol: strongest.symbol,
           });
+          if (!ok) autoDispatchLockRef.current = false;
+          return;
         }
 
-        // 3. Super Recovery Base Sequence Continuation Loop
         if (activeBotRef.current === 'SUPER_RECOVERY' && autoNextTradeRef.current) {
-          setPendingTrades((latestPending) => {
-            const hasPending = latestPending.some((t) => t.status === 'PENDING');
-            if (!hasPending && !isDispatchingTradeRef.current && sessionStats.consecutiveLosses === 0) {
-              isDispatchingTradeRef.current = true;
-              const cfg = autoRecoveryConfigRef.current;
-              setTimeout(() => {
-                isDispatchingTradeRef.current = false;
-                if (handleSimulateTradeRef.current && activeBotRef.current === 'SUPER_RECOVERY') {
-                  handleSimulateTradeRef.current({
-                    symbol: currentSymbol,
-                    contractType: cfg.contractType || 'DIFFERS',
-                    targetValue: 5,
-                    stake: cfg.baseStake || 1.0,
-                  });
-                }
-              }, 200);
-            }
-            return latestPending;
+          const cfg = autoRecoveryConfigRef.current;
+          autoDispatchLockRef.current = true;
+          const current = marketAnalysesRef.current[currentSymbolRef.current];
+          const ok = handlePlaceTradeRef.current({
+            contractType: cfg.contractType,
+            targetValue: typeof current?.recommendedTarget !== 'undefined' ? current.recommendedTarget : 5,
+            stake: cfg.baseStake,
+            symbol: currentSymbolRef.current,
           });
+          if (!ok) autoDispatchLockRef.current = false;
         }
+        return;
+      }
+
+      if (data.msg_type === 'proposal_success' && data.clientTradeId && data.proposal) {
+        const ask = Number(data.proposal.ask_price);
+        const payout = Number(data.proposal.payout);
+        const multiplier = ask > 0 && payout > 0 ? payout / ask : 0;
+        syncPendingTrades((prev) => prev.map((trade) => trade.id === data.clientTradeId ? { ...trade, stake: Number.isFinite(ask) && ask > 0 ? ask : trade.stake, payout: Number.isFinite(multiplier) ? multiplier : 0 } : trade));
+        return;
+      }
+
+      if (data.msg_type === 'buy_success' && data.buy) {
+        const clientTradeId = data.clientTradeId;
+        const contractId = String(data.buy.contract_id);
+        let updatedActive: TradeRecord | null = null;
+        syncPendingTrades((prev) => prev.map((trade) => {
+          if (trade.id !== clientTradeId) return trade;
+          const buyPrice = Number(data.buy.buy_price);
+          const payout = Number(data.buy.payout);
+          const stake = Number.isFinite(buyPrice) && buyPrice > 0 ? buyPrice : trade.stake;
+          const multiplier = payout > 0 && stake > 0 ? payout / stake : trade.payout;
+          const updated = { ...trade, id: contractId, stake, payout: Number.isFinite(multiplier) ? multiplier : trade.payout };
+          updatedActive = updated;
+          return updated;
+        }));
+        if (updatedActive) setActiveTradeVisualizerRecord(updatedActive);
+        autoDispatchLockRef.current = false;
+        return;
+      }
+
+      if (data.msg_type === 'trade_error') {
+        const clientTradeId = data.clientTradeId;
+        if (clientTradeId) syncPendingTrades((prev) => prev.filter((trade) => trade.id !== clientTradeId));
+        setActiveTradeVisualizerRecord(null);
+        autoDispatchLockRef.current = false;
+        showNotice(`Deriv rejected the trade${data.error ? `: ${data.error}` : '.'}`);
+        return;
+      }
+
+      if (data.msg_type === 'contract_update' && data.contract) {
+        const contract = data.contract;
+        const statusText = String(contract.status || '').toLowerCase();
+        const settled = Boolean(contract.is_sold) || statusText === 'won' || statusText === 'lost' || statusText === 'sold';
+        if (!settled) return;
+
+        const contractId = String(contract.contract_id);
+        const pending = pendingTradesRef.current.find((trade) => trade.id === contractId);
+        if (!pending) return;
+
+        const actualProfit = Number(contract.profit ?? 0);
+        const actualStake = Number(contract.buy_price ?? pending.stake);
+        const actualPayout = Number(contract.payout ?? 0);
+        const won = statusText === 'won' || actualProfit > 0;
+        const exitPrice = Number(contract.exit_tick ?? pending.entryPrice);
+        const entryPrice = Number(contract.entry_tick ?? pending.entryPrice);
+        const exitDigit = derivService.extractLastDigit(exitPrice, pending.symbol);
+        const entryDigit = derivService.extractLastDigit(entryPrice, pending.symbol);
+        const payoutMultiplier = actualStake > 0 && actualPayout > 0 ? actualPayout / actualStake : pending.payout;
+
+        const settledTrade: TradeRecord = {
+          ...pending,
+          id: contractId,
+          timestamp: Number(contract.sell_time ? contract.sell_time * 1000 : Date.now()),
+          entryPrice,
+          entryDigit,
+          exitPrice,
+          exitDigit,
+          stake: Number.isFinite(actualStake) ? actualStake : pending.stake,
+          payout: Number.isFinite(payoutMultiplier) ? payoutMultiplier : pending.payout,
+          status: won ? 'WON' : 'LOST',
+          profit: Number.isFinite(actualProfit) ? actualProfit : 0,
+        };
+
+        syncPendingTrades((prev) => prev.filter((trade) => trade.id !== contractId));
+        setActiveTradeVisualizerRecord(null);
+        setLastSettledTrade(settledTrade);
+        autoDispatchLockRef.current = false;
+        const nextStats = persistSettlement(settledTrade);
+        if (won) playWinSound(); else playLossSound();
+
+        const toastId = contractId;
+        setLastSettledToast({
+          id: toastId,
+          won,
+          text: won
+            ? `Deriv settled contract ${contractId}: +${actualProfit.toFixed(2)} ${accountInfoRef.current.currency || 'USD'}`
+            : `Deriv settled contract ${contractId}: ${actualProfit.toFixed(2)} ${accountInfoRef.current.currency || 'USD'}`,
+        });
+        setTimeout(() => setLastSettledToast((current) => current?.id === toastId ? null : current), 4000);
+
+        const recoveryCfg = autoRecoveryConfigRef.current;
+        const profitTarget = recoveryCfg.profitLockTarget ?? recoveryCfg.takeProfit;
+        if ((recoveryCfg.profitLockEnabled ?? true) && nextStats.netProfit >= profitTarget) {
+          handleStopAllBots();
+          showNotice(`Profit lock reached at ${nextStats.netProfit.toFixed(2)} ${accountInfoRef.current.currency || 'USD'}.`);
+          return;
+        }
+
+        if (!won && autoNextTradeRef.current) {
+          if (nextStats.cumulativeLoss >= recoveryCfg.stopLoss || nextStats.consecutiveLosses >= recoveryCfg.maxConsecutiveLosses) {
+            handleStopAllBots();
+            showNotice('Recovery circuit breaker reached. Automatic trading stopped.');
+            return;
+          }
+
+          const actualGrossMultiplier = settledTrade.payout > 1 ? settledTrade.payout : recoveryCfg.payoutRate;
+          const nextStake = calculateNextStake(
+            recoveryCfg.baseStake,
+            nextStats.cumulativeLoss,
+            nextStats.consecutiveLosses,
+            actualGrossMultiplier,
+            recoveryCfg.recoveryStrategy,
+          );
+          setTimeout(() => {
+            handlePlaceTradeRef.current({
+              contractType: settledTrade.contractType,
+              targetValue: settledTrade.targetValue,
+              stake: nextStake,
+              symbol: settledTrade.symbol,
+            });
+          }, 150);
+        }
+        return;
       }
     });
 
-    // Initial load for active symbol
-    derivService.requestTickHistory(currentSymbol, 1000);
-    derivService.subscribeTicks(currentSymbol);
+    return unsubscribe;
+  }, [handleStopAllBots, persistSettlement, showNotice]);
 
-    // Initial load for top markets in scanner
-    POPULAR_SYMBOLS.slice(0, 8).forEach((sym, idx) => {
-      setTimeout(() => {
-        derivService.requestTickHistory(sym.symbol, 500);
-      }, idx * 100);
-    });
-
-    return () => {
-      unsubscribe();
-    };
-  }, [currentSymbol]);
-
-  // Switch active symbol with instantaneous chart update (no flash or delay)
   const handleSelectSymbol = (newSymbol: string) => {
-    if (newSymbol === currentSymbol) return;
+    if (newSymbol === currentSymbolRef.current) return;
     setCurrentSymbol(newSymbol);
-
+    currentSymbolRef.current = newSymbol;
     const cached = marketTickDataRef.current[newSymbol];
-    if (cached && cached.prices.length > 0) {
+    if (cached?.prices.length) {
       setPrices(cached.prices);
       setDigits(cached.digits);
       setCurrentPrice(cached.prices[cached.prices.length - 1]);
       setLastDigit(cached.digits[cached.digits.length - 1]);
+      setPip(derivService.getPipSize(newSymbol));
     } else {
-      const generated = derivService.generateRealisticHistory(newSymbol, 80);
-      setPrices(generated);
-      setDigits(generated.map((p) => derivService.extractLastDigit(p, newSymbol)));
-      setCurrentPrice(generated[generated.length - 1]);
-      setLastDigit(derivService.extractLastDigit(generated[generated.length - 1], newSymbol));
+      setPrices([]);
+      setDigits([]);
+      setCurrentPrice(0);
+      setLastDigit(0);
+      derivService.requestTickHistory(newSymbol, scanDepth);
     }
-
-    derivService.requestTickHistory(newSymbol, 1000);
-    derivService.subscribeTicks(newSymbol);
   };
 
-  // Place simulated trade (Supports single symbol or multi-market bulk execution)
-  const handleSimulateTrade = (tradeData: {
-    contractType: any;
-    targetValue: any;
-    stake: number;
-    symbol?: string;
-    entryPrice?: number;
-    entryDigit?: number;
-    payout?: number;
-  }) => {
-    const sym = tradeData.symbol || currentSymbol;
-    const symData = marketTickDataRef.current[sym];
-    const ePrice =
-      tradeData.entryPrice !== undefined
-        ? tradeData.entryPrice
-        : symData?.prices?.length
-        ? symData.prices[symData.prices.length - 1]
-        : currentPrice;
-    const eDigit =
-      tradeData.entryDigit !== undefined
-        ? tradeData.entryDigit
-        : symData?.digits?.length
-        ? symData.digits[symData.digits.length - 1]
-        : lastDigit;
-
-    const payoutPreset =
-      tradeData.payout || CONTRACT_PAYOUT_PRESETS[tradeData.contractType]?.payoutRate || 1.95;
-
-    // Deduct stake upon order placement
-    if (accountMode === 'DEMO') {
-      setDemoBalance((prev) => {
-        const nextBal = Math.max(0, Number((prev - tradeData.stake).toFixed(2)));
-        try {
-          localStorage.setItem('deriv_demo_balance', nextBal.toString());
-        } catch {}
-        return nextBal;
-      });
-    } else {
-      setRealBalance((prev) => {
-        const nextBal = Math.max(0, Number((prev - tradeData.stake).toFixed(2)));
-        try {
-          localStorage.setItem('deriv_real_balance', nextBal.toString());
-        } catch {}
-        return nextBal;
-      });
-      setAccountInfo((prev) => ({
-        ...prev,
-        balance: Math.max(0, Number(((prev.balance || 0) - tradeData.stake).toFixed(2))),
-      }));
-    }
-
-    const newTrade: TradeRecord = {
-      id: `trade-${Date.now()}-${Math.random().toString(36).substring(2, 9)}-${Math.random().toString(36).substring(2, 6)}`,
-      timestamp: Date.now(),
-      symbol: sym,
-      contractType: tradeData.contractType,
-      targetValue: tradeData.targetValue,
-      entryPrice: ePrice,
-      entryDigit: eDigit,
-      stake: tradeData.stake,
-      payout: payoutPreset,
-      status: 'PENDING',
-      profit: 0,
-      recoveryStep: sessionStats.consecutiveLosses + 1,
-    };
-
-    setPendingTrades((prev) => [...prev, newTrade]);
-    setActiveTradeVisualizerRecord(newTrade);
-    playOrderDispatchedSound();
-
-    // When Real Deriv account is authorized, execute real contract order via Deriv WebSocket
-    if (accountMode === 'REAL' && accountInfo.isAuthorized) {
-      derivService.buyContract({
-        contract_type:
-          tradeData.contractType === 'MATCHES'
-            ? 'DIGITMATCH'
-            : tradeData.contractType === 'DIFFERS'
-            ? 'DIGITDIFF'
-            : tradeData.contractType === 'OVER'
-            ? 'DIGITOVER'
-            : tradeData.contractType === 'UNDER'
-            ? 'DIGITUNDER'
-            : 'CALL',
-        symbol: sym,
-        amount: tradeData.stake,
-        duration: 1,
-        duration_unit: 't',
-        barrier: tradeData.targetValue,
-      });
-    }
-  };
-  handleSimulateTradeRef.current = handleSimulateTrade;
-
-  // High-Speed Safety Engine: Prevent any pending trade from being stuck indefinitely
-  useEffect(() => {
-    const safetyInterval = setInterval(() => {
-      const now = Date.now();
-      setPendingTrades((currentPending) => {
-        if (currentPending.length === 0) return currentPending;
-        const expired = currentPending.filter((t) => t.status === 'PENDING' && now - t.timestamp > 1500);
-        if (expired.length === 0) return currentPending;
-
-        const remaining = currentPending.filter((t) => !(t.status === 'PENDING' && now - t.timestamp > 1500));
-        expired.forEach((trade) => {
-          const symData = marketTickDataRef.current[trade.symbol];
-          const latestPrice = symData?.prices?.slice(-1)[0] ?? trade.entryPrice;
-          const latestDigit = symData?.digits?.slice(-1)[0] ?? derivService.extractLastDigit(latestPrice, trade.symbol);
-          let won = false;
-          switch (trade.contractType) {
-            case 'MATCHES': won = latestDigit === Number(trade.targetValue); break;
-            case 'DIFFERS': won = latestDigit !== Number(trade.targetValue); break;
-            case 'OVER': won = latestDigit > Number(trade.targetValue); break;
-            case 'UNDER': won = latestDigit < Number(trade.targetValue); break;
-            case 'RISE': won = latestPrice > trade.entryPrice; break;
-            case 'FALL': won = latestPrice < trade.entryPrice; break;
-          }
-          const netProfit = won
-            ? Number((trade.stake * (trade.payout > 1.5 ? trade.payout - 1 : trade.payout)).toFixed(2))
-            : -trade.stake;
-
-          if (won) {
-            if (accountMode === 'REAL') {
-              setRealBalance((prev) => {
-                const updated = Number((prev + trade.stake + netProfit).toFixed(2));
-                try {
-                  localStorage.setItem('deriv_real_balance', updated.toString());
-                } catch {}
-                return updated;
-              });
-              setAccountInfo((prev) => ({
-                ...prev,
-                balance: Number(((prev.balance || 0) + trade.stake + netProfit).toFixed(2)),
-              }));
-            } else {
-              setDemoBalance((prev) => {
-                const updated = Number((prev + trade.stake + netProfit).toFixed(2));
-                try {
-                  localStorage.setItem('deriv_demo_balance', updated.toString());
-                } catch {}
-                return updated;
-              });
-            }
-          }
-
-          const settledRecord: TradeRecord = {
-            ...trade,
-            exitPrice: latestPrice,
-            exitDigit: latestDigit,
-            status: won ? 'WON' : 'LOST',
-            profit: netProfit,
-          };
-
-          setTradeHistory((prev) => {
-            if (prev.some((item) => item.id === settledRecord.id)) {
-              return prev;
-            }
-            const nextHistory = [settledRecord, ...prev].slice(0, 1000);
-            try {
-              localStorage.setItem('deriv_recovery_trade_history', JSON.stringify(nextHistory));
-            } catch {}
-            return nextHistory;
-          });
-          setLastSettledTrade(settledRecord);
-          setActiveTradeVisualizerRecord(null);
-          if (won) playWinSound(); else playLossSound();
-        });
-
-        isDispatchingTradeRef.current = false;
-        return remaining;
-      });
-    }, 600);
-
-    return () => clearInterval(safetyInterval);
-  }, [accountMode]);
-
-  // Execute a batch of bulk trades across multiple markets simultaneously
-  const handleExecuteBulkTrades = (
-    trades: Array<{
-      symbol: string;
-      contractType: 'MATCHES' | 'DIFFERS' | 'OVER' | 'UNDER' | 'RISE' | 'FALL';
-      targetValue: number | string;
-      stake: number;
-    }>
-  ) => {
-    trades.forEach((t) => {
-      const symData = marketTickDataRef.current[t.symbol];
-      const curP = symData?.prices?.length
-        ? symData.prices[symData.prices.length - 1]
-        : currentPrice;
-      const curD = symData?.digits?.length
-        ? symData.digits[symData.digits.length - 1]
-        : lastDigit;
-
-      handleSimulateTrade({
-        contractType: t.contractType,
-        targetValue: t.targetValue,
-        stake: t.stake,
-        symbol: t.symbol,
-        entryPrice: curP,
-        entryDigit: curD,
-      });
+  const handleTriggerDeepScan = (depth: number) => {
+    setScanDepth(depth);
+    setIsDeepScanning(true);
+    historyPendingRef.current = new Set(POPULAR_SYMBOLS.map((item) => item.symbol));
+    POPULAR_SYMBOLS.forEach((item, index) => {
+      setTimeout(() => derivService.requestTickHistory(item.symbol, depth), index * 80);
     });
   };
 
+  const handleToggleWatchlist = (symbol: string) => {
+    setWatchlist((prev) => {
+      const next = prev.includes(symbol) ? prev.filter((item) => item !== symbol) : [...prev, symbol];
+      try { localStorage.setItem('deriv_watchlist', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  const requireAuthorizedBot = (bot: ActiveBotType): boolean => {
+    if (!connected || !accountInfoRef.current.isAuthorized) {
+      setIsConnectModalOpen(true);
+      showNotice('Authorize a Deriv account before starting an automated trading bot.');
+      return false;
+    }
+    setActiveBotSafe(bot);
+    return true;
+  };
+
+  const handleToggleAutoMatches = (running: boolean) => {
+    if (running && !requireAuthorizedBot('AUTO_MATCHES')) return;
+    setAutoMatchesActive(running);
+    autoMatchesActiveRef.current = running;
+    if (!running) setActiveBotSafe('NONE');
+  };
+
+  const handleToggleStrongestBot = (running: boolean) => {
+    if (running && !requireAuthorizedBot('STRONGEST_WIN')) return;
+    if (!running) setActiveBotSafe('NONE');
+  };
+
+  const handleToggleSuperRecoveryBot = (running: boolean) => {
+    if (running && !requireAuthorizedBot('SUPER_RECOVERY')) return;
+    setAutoNextTrade(running);
+    autoNextTradeRef.current = running;
+    if (!running) setActiveBotSafe('NONE');
+  };
+
+  const handleToggleBulkBot = (running: boolean) => {
+    if (running && !requireAuthorizedBot('BULK_AUTO')) return;
+    if (!running) setActiveBotSafe('NONE');
+  };
+
+  const handleExecuteBulkTrades = (trades: TradeInput[]) => {
+    if (!connected || !accountInfoRef.current.isAuthorized) {
+      setIsConnectModalOpen(true);
+      showNotice('Authorize Deriv before submitting bulk contracts.');
+      return;
+    }
+    trades.forEach((trade, index) => {
+      setTimeout(() => handlePlaceTrade({ ...trade }), index * 75);
+    });
+  };
+
+  const handleToggleAccountMode = (requested: AccountMode) => {
+    const list = accountInfoRef.current.accountsList || [];
+    const match = list.find((account) => requested === 'DEMO' ? account.is_virtual : !account.is_virtual);
+    if (match) derivService.switchAccount(match.loginid);
+    else setIsConnectModalOpen(true);
+  };
+
   const handleResetSession = () => {
-    const freshStats = {
-      totalTrades: 0,
-      wins: 0,
-      losses: 0,
-      netProfit: 0,
-      consecutiveLosses: 0,
-      cumulativeLoss: 0,
-      peakDrawdown: 0,
-    };
-    setSessionStats(freshStats);
+    sessionStatsRef.current = EMPTY_STATS;
+    setSessionStats(EMPTY_STATS);
+    tradeHistoryRef.current = [];
     setTradeHistory([]);
-    setAutoRecoveryNotice(null);
+    setLastSettledTrade(null);
     try {
-      localStorage.removeItem('deriv_recovery_trade_history');
-      localStorage.removeItem('deriv_recovery_session_stats');
+      localStorage.removeItem(REAL_HISTORY_KEY);
+      localStorage.removeItem(REAL_STATS_KEY);
     } catch {}
   };
 
-  // Active market analysis
-  const currentAnalysis = marketAnalyses[currentSymbol] || null;
-
-  // Active sample slice for digit analysis
-  const sampleDigits = digits.slice(-sampleSize);
-  const sampleAnalysis = analyzeDigits(sampleDigits);
-
-  // Price delta for header
-  const startPrice = prices[0] || currentPrice;
-  const priceChange = Number((currentPrice - startPrice).toFixed(pip));
-  const priceChangePct = startPrice !== 0 ? Number(((priceChange / startPrice) * 100).toFixed(2)) : 0;
-
-  const getActiveBotTitle = (bot: ActiveBotType) => {
-    switch (bot) {
-      case 'BULK_AUTO':
-        return '⚡ Bulk Multi-Market High-Speed Auto Bot';
-      case 'STRONGEST_WIN':
-        return '🏆 Strongest Market Live Auto-Trader Bot';
-      case 'AUTO_MATCHES':
-        return '🎯 Deep Markov Auto-Matches Sniper Bot';
-      case 'SUPER_RECOVERY':
-        return '🛡️ Super Recovery X2/X4 Automated Engine';
-      default:
-        return 'No Bot Active (Manual Mode)';
-    }
+  const handleRecoveryConfigChange = (config: RiskConfig) => {
+    autoRecoveryConfigRef.current = config;
   };
+
+  const handleToggleAutoNextTrade = (enabled: boolean) => {
+    if (enabled && (!connected || !accountInfoRef.current.isAuthorized)) {
+      setIsConnectModalOpen(true);
+      return;
+    }
+    setAutoNextTrade(enabled);
+    autoNextTradeRef.current = enabled;
+  };
+
+  const handleAuthSuccess = (profile: UserProfile) => {
+    setUserProfile(profile);
+    try { localStorage.setItem('deriv_user_profile', JSON.stringify(profile)); } catch {}
+  };
+
+  const currentAnalysis = marketAnalyses[currentSymbol] || null;
+  const sampleAnalysis = analyzeDigits(digits.slice(-sampleSize));
+  const startPrice = prices[0] || currentPrice;
+  const priceChange = currentPrice && startPrice ? Number((currentPrice - startPrice).toFixed(pip)) : 0;
+  const priceChangePct = currentPrice && startPrice ? Number((((currentPrice - startPrice) / startPrice) * 100).toFixed(2)) : 0;
+
+  const latestTick = currentPrice > 0 ? {
+    epoch: Date.now(),
+    quote: currentPrice,
+    symbol: currentSymbol,
+    pip,
+    lastDigit,
+  } : null;
+
+  const currentBalance = liveBalance;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-slate-950">
-      {/* 1. Header with live status & price, Watchlist toggle & Deriv connect */}
       <Header
         currentSymbol={currentSymbol}
         symbols={POPULAR_SYMBOLS}
@@ -1331,454 +796,167 @@ export default function App() {
         userProfile={userProfile}
         accountInfo={accountInfo}
         accountMode={accountMode}
-        onToggleAccountMode={(mode) => {
-          setAccountMode(mode);
-          try {
-            localStorage.setItem('deriv_account_mode', mode);
-          } catch {}
-        }}
+        onToggleAccountMode={handleToggleAccountMode}
         demoBalance={demoBalance}
         realBalance={realBalance}
         activeBot={activeBot}
         onStopActiveBot={handleStopAllBots}
       />
 
-      {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* Active Bot HUD Banner - Know which bot or system is currently running */}
         {activeBot !== 'NONE' && (
-          <div
-            id="active-bot-running-banner"
-            className="p-3.5 sm:p-4 rounded-2xl bg-gradient-to-r from-emerald-950/80 via-slate-900 to-cyan-950/80 border border-emerald-500/50 shadow-xl shadow-emerald-950/40 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 animate-in fade-in"
-          >
+          <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/80 via-slate-900 to-cyan-950/80 border border-emerald-500/50 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <span className="relative flex h-3.5 w-3.5 shrink-0">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
-              </span>
+              <span className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse" />
               <div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs font-mono font-black uppercase tracking-wider text-emerald-400">
-                    BOT CURRENTLY ACTIVE:
-                  </span>
-                  <span className="text-sm font-black text-white">
-                    {getActiveBotTitle(activeBot)}
-                  </span>
-                  <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                    {accountMode} MODE
-                  </span>
-                </div>
-                <div className="text-xs text-slate-300 mt-0.5">
-                  100% Real Deriv WebSocket automated execution stream • Real-time tick evaluation
-                </div>
+                <div className="text-sm font-black text-white">Automated Deriv execution active: {activeBot}</div>
+                <div className="text-xs text-slate-300">Orders and settlements are accepted only from the authorized Deriv connection.</div>
               </div>
             </div>
-
-            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
-              <button
-                onClick={() => {
-                  if (activeBot === 'BULK_AUTO') setActiveTab('BULK');
-                  if (activeBot === 'STRONGEST_WIN') setActiveTab('SCANNER');
-                  if (activeBot === 'AUTO_MATCHES') setActiveTab('DEEP_SCAN');
-                  if (activeBot === 'SUPER_RECOVERY') setActiveTab('RECOVERY');
-                }}
-                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition-colors cursor-pointer border border-slate-700"
-              >
-                Go to Bot Control
-              </button>
-              <button
-                id="stop-active-bot-banner-btn"
-                onClick={handleStopAllBots}
-                className="px-4 py-1.5 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-extrabold flex items-center gap-1.5 shadow-md shadow-rose-950/50 cursor-pointer"
-              >
-                <Square className="w-3.5 h-3.5 fill-white" />
-                <span>STOP BOT</span>
-              </button>
-            </div>
+            <button onClick={handleStopAllBots} className="px-4 py-2 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-extrabold flex items-center gap-1.5">
+              <Square className="w-3.5 h-3.5 fill-white" /> STOP BOT
+            </button>
           </div>
         )}
 
-        {/* Navigation Tabs */}
+        {lastSettledToast && (
+          <div className={`p-3 rounded-xl border text-xs font-mono ${lastSettledToast.won ? 'bg-emerald-950/60 border-emerald-500/40 text-emerald-200' : 'bg-rose-950/60 border-rose-500/40 text-rose-200'}`}>
+            {lastSettledToast.text}
+          </div>
+        )}
+
         <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
-          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
-            <button
-              onClick={() => setActiveTab('OVERVIEW')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'OVERVIEW'
-                  ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-950'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              <Activity className="w-3.5 h-3.5" />
-              Full Terminal
-            </button>
-
-            {/* ⚡ Bulk Multi-Bot Tab */}
-            <button
-              id="nav-tab-bulk-bot"
-              onClick={() => setActiveTab('BULK')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'BULK'
-                  ? 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 shadow-md shadow-emerald-950 font-extrabold'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
-              <span>⚡ Bulk Multi-Bot</span>
-              {activeBot === 'BULK_AUTO' && (
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-              )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab('DEEP_SCAN')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'DEEP_SCAN'
-                  ? 'bg-purple-600 text-white shadow-md shadow-purple-950'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5" />
-              Deep Scan &amp; Auto-Matches
-              {activeBot === 'AUTO_MATCHES' && (
-                <span className="w-2 h-2 rounded-full bg-purple-400 animate-ping"></span>
-              )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab('SCANNER')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'SCANNER'
-                  ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-950'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              <Zap className="w-3.5 h-3.5" />
-              Strongest to Win
-              {activeBot === 'STRONGEST_WIN' && (
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
-              )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab('MATCHES')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'MATCHES'
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-950'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              <Target className="w-3.5 h-3.5" />
-              Matches &amp; Differs
-            </button>
-
-            <button
-              onClick={() => setActiveTab('RECOVERY')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                activeTab === 'RECOVERY'
-                  ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-950'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
-              }`}
-            >
-              <ShieldCheck className="w-3.5 h-3.5" />
-              Super Recovery X2/X4
-              {(activeBot === 'SUPER_RECOVERY' || autoNextTrade) && (
-                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping"></span>
-              )}
-            </button>
-
-            <button
-              id="nav-tab-cashier-btn"
-              onClick={() => setIsCashierOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all bg-slate-900 text-slate-300 hover:text-white border border-slate-800 hover:border-emerald-500/50 cursor-pointer font-mono"
-            >
-              <Wallet className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Cashier (Deposit/Withdraw)</span>
+          <div className="flex items-center gap-2 flex-wrap">
+            {([
+              ['OVERVIEW', 'Full Terminal', Activity],
+              ['BULK', 'Bulk Multi-Bot', Zap],
+              ['DEEP_SCAN', 'Deep Scan & Auto-Matches', Layers],
+              ['SCANNER', 'Strongest Signal', Zap],
+              ['MATCHES', 'Matches & Differs', Target],
+              ['RECOVERY', 'Recovery', ShieldCheck],
+            ] as const).map(([tab, label, Icon]) => (
+              <button key={tab} onClick={() => setActiveTab(tab)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === tab ? 'bg-emerald-500 text-slate-950' : 'bg-slate-900 text-slate-400 border border-slate-800 hover:text-white'}`}>
+                <Icon className="w-3.5 h-3.5" /> {label}
+              </button>
+            ))}
+            <button onClick={() => setIsCashierOpen(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-900 text-slate-300 border border-slate-800">
+              <Wallet className="w-3.5 h-3.5 text-emerald-400" /> Official Cashier
             </button>
           </div>
-
-          <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>100% Real Live Deriv WebSocket Data</span>
+          <div className="text-xs font-mono text-slate-400 flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400' : 'bg-rose-500'}`} />
+            <span>{connected ? 'Real Deriv WebSocket data' : 'Disconnected — no substitute data'}</span>
           </div>
         </div>
 
-        {/* Deriv 100% Real Running & Settled Trade Monitor (Always Mounted & Visible) */}
         <DerivActiveTradeRunner
           activeTrade={activeTradeVisualizerRecord}
           lastSettledTrade={lastSettledTrade}
-          latestTick={{
-            epoch: Date.now(),
-            quote: currentPrice,
-            symbol: currentSymbol,
-            pip,
-            lastDigit,
-          }}
+          latestTick={latestTick}
           recentTrades={tradeHistory}
           onClearActiveTrade={() => setActiveTradeVisualizerRecord(null)}
           onClearLastSettled={() => setLastSettledTrade(null)}
         />
 
-        {/* View: Bulk Multi-Market Speed Trader Bot */}
-        {activeTab === 'BULK' && (
-          <div className="space-y-6">
-            <BulkMultiTrader
-              analyses={marketAnalyses}
-              onExecuteBulkTrades={handleExecuteBulkTrades}
-              isGlobalRunning={activeBot === 'BULK_AUTO'}
-              onToggleGlobalRun={handleToggleBulkBot}
-              accountMode={accountMode}
-              currentBalance={accountMode === 'DEMO' ? demoBalance : realBalance}
-            />
-
-            {/* Live Chart for Currently Selected Market */}
-            <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60">
-              <LiveChart
-                prices={prices}
-                digits={digits}
-                symbol={currentSymbol}
-                pip={pip}
-                currentPrice={currentPrice}
-              />
-            </div>
-          </div>
+        {(activeTab === 'OVERVIEW' || activeTab === 'BULK') && (
+          <BulkMultiTrader
+            analyses={marketAnalyses}
+            marketTicks={marketTickDataRef.current}
+            onExecuteBulkTrades={handleExecuteBulkTrades}
+            pendingTrades={pendingTrades}
+            tradeHistory={tradeHistory}
+            isGlobalRunning={activeBot === 'BULK_AUTO'}
+            onToggleGlobalRun={handleToggleBulkBot}
+            accountMode={accountMode}
+            currentBalance={currentBalance}
+          />
         )}
 
-        {/* View 1: Overview Terminal (All in One) */}
-        {activeTab === 'OVERVIEW' && (
-          <div className="space-y-6">
-            {/* Bulk Multi-Trader Component Hero */}
-            <BulkMultiTrader
-              analyses={marketAnalyses}
-              onExecuteBulkTrades={handleExecuteBulkTrades}
-              isGlobalRunning={activeBot === 'BULK_AUTO'}
-              onToggleGlobalRun={handleToggleBulkBot}
-              accountMode={accountMode}
-              currentBalance={accountMode === 'DEMO' ? demoBalance : realBalance}
-            />
-
-            {/* Top Strongest Market Scanner Spotlight with Watchlist support */}
-            <StrongestMarketScanner
-              analyses={marketAnalyses}
-              currentSymbol={currentSymbol}
-              onSelectMarket={handleSelectSymbol}
-              watchlist={watchlist}
-              onToggleWatchlist={handleToggleWatchlist}
-              isRunning={activeBot === 'STRONGEST_WIN'}
-              onToggleRun={handleToggleStrongestBot}
-              onApplySignalToRecovery={(analysis) => {
-                setActiveTab('RECOVERY');
-              }}
-            />
-
-            {/* Deep Scan 1000+ & Auto-Matches Engine */}
-            <DeepScanAutoMatches
-              analyses={marketAnalyses}
-              marketTicks={marketTickDataRef.current}
-              currentSymbol={currentSymbol}
-              onSelectMarket={handleSelectSymbol}
-              scanDepth={scanDepth}
-              onScanDepthChange={setScanDepth}
-              onTriggerDeepScan={handleTriggerDeepScan}
-              isDeepScanning={isDeepScanning}
-              autoMatchesActive={activeBot === 'AUTO_MATCHES' || autoMatchesActive}
-              onToggleAutoMatches={handleToggleAutoMatches}
-              recoveryMode={recoveryMode}
-              onRecoveryModeChange={setRecoveryMode}
-              baseStake={1.0}
-              onSimulateTrade={handleSimulateTrade}
-              sessionStats={sessionStats}
-              accountMode={accountMode}
-              currentBalance={accountMode === 'DEMO' ? demoBalance : realBalance}
-              onOpenCashier={() => setIsCashierOpen(true)}
-            />
-
-            {/* Live Interactive Tick Chart */}
-            <div className="p-4 sm:p-5 rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur-sm space-y-4">
-              <LiveChart
-                prices={prices}
-                digits={digits}
-                symbol={currentSymbol}
-                pip={pip}
-                currentPrice={currentPrice}
-              />
-              
-              {/* Technical Indicators Row */}
-              <IndicatorsPanel analysis={currentAnalysis} pip={pip} />
-            </div>
-
-            {/* Matches & Differs Real-Time Digit Engine */}
-            <MatchesDigitAnalyzer
-              digitStats={sampleAnalysis.digitStats}
-              hotDigit={sampleAnalysis.hotDigit}
-              coldDigit={sampleAnalysis.coldDigit}
-              evenPct={sampleAnalysis.evenPct}
-              oddPct={sampleAnalysis.oddPct}
-              overPct={sampleAnalysis.overPct}
-              underPct={sampleAnalysis.underPct}
-              recentDigits={digits}
-              sampleSize={sampleSize}
-              onSampleSizeChange={(size) => setSampleSize(size)}
-            />
-
-            {/* Super Recovery Protocol & Live Execution */}
-            <SuperRecoveryManager
-              currentSymbol={currentSymbol}
-              currentPrice={currentPrice}
-              lastDigit={lastDigit}
-              recommendedContract={currentAnalysis?.recommendedContract || 'DIFFERS'}
-              recommendedTarget={currentAnalysis?.recommendedTarget || 5}
-              onSimulateTrade={handleSimulateTrade}
-              tradeHistory={tradeHistory}
-              sessionStats={sessionStats}
-              onResetSession={handleResetSession}
-              autoNextTrade={autoNextTrade}
-              onToggleAutoNextTrade={handleToggleAutoNextTrade}
-              autoRecoveryNotice={autoRecoveryNotice}
-              onDismissNotice={() => setAutoRecoveryNotice(null)}
-              onConfigChange={handleRecoveryConfigChange}
-              isRunning={activeBot === 'SUPER_RECOVERY' || autoNextTrade}
-              onToggleRun={handleToggleSuperRecoveryBot}
-            />
-          </div>
+        {(activeTab === 'OVERVIEW' || activeTab === 'SCANNER') && (
+          <StrongestMarketScanner
+            analyses={marketAnalyses}
+            currentSymbol={currentSymbol}
+            onSelectMarket={handleSelectSymbol}
+            watchlist={watchlist}
+            onToggleWatchlist={handleToggleWatchlist}
+            isRunning={activeBot === 'STRONGEST_WIN'}
+            onToggleRun={handleToggleStrongestBot}
+            onApplySignalToRecovery={() => setActiveTab('RECOVERY')}
+          />
         )}
 
-        {/* View 2: Dedicated Deep Scan 1000+ & Auto Matches */}
-        {activeTab === 'DEEP_SCAN' && (
-          <div className="space-y-6">
-            <DeepScanAutoMatches
-              analyses={marketAnalyses}
-              marketTicks={marketTickDataRef.current}
-              currentSymbol={currentSymbol}
-              onSelectMarket={handleSelectSymbol}
-              scanDepth={scanDepth}
-              onScanDepthChange={setScanDepth}
-              onTriggerDeepScan={handleTriggerDeepScan}
-              isDeepScanning={isDeepScanning}
-              autoMatchesActive={activeBot === 'AUTO_MATCHES' || autoMatchesActive}
-              onToggleAutoMatches={handleToggleAutoMatches}
-              recoveryMode={recoveryMode}
-              onRecoveryModeChange={setRecoveryMode}
-              baseStake={1.0}
-              onSimulateTrade={handleSimulateTrade}
-              sessionStats={sessionStats}
-              tradeHistory={tradeHistory}
-              onClearHistory={handleResetSession}
-              autoMatchesConfig={autoMatchesConfig}
-              onAutoMatchesConfigChange={(newCfg) => {
-                setAutoMatchesConfig(newCfg);
-                try {
-                  localStorage.setItem('deriv_auto_matches_config', JSON.stringify(newCfg));
-                } catch {}
-              }}
-              accountMode={accountMode}
-              currentBalance={accountMode === 'DEMO' ? demoBalance : realBalance}
-              onOpenCashier={() => setIsCashierOpen(true)}
-            />
-
-            <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60">
-              <LiveChart
-                prices={prices}
-                digits={digits}
-                symbol={currentSymbol}
-                pip={pip}
-                currentPrice={currentPrice}
-              />
-            </div>
-          </div>
+        {(activeTab === 'OVERVIEW' || activeTab === 'DEEP_SCAN') && (
+          <DeepScanAutoMatches
+            analyses={marketAnalyses}
+            marketTicks={marketTickDataRef.current}
+            currentSymbol={currentSymbol}
+            onSelectMarket={handleSelectSymbol}
+            scanDepth={scanDepth}
+            onScanDepthChange={setScanDepth}
+            onTriggerDeepScan={handleTriggerDeepScan}
+            isDeepScanning={isDeepScanning}
+            autoMatchesActive={autoMatchesActive}
+            onToggleAutoMatches={handleToggleAutoMatches}
+            recoveryMode={recoveryMode}
+            onRecoveryModeChange={setRecoveryMode}
+            baseStake={1}
+            onSimulateTrade={handlePlaceTrade}
+            sessionStats={sessionStats}
+            tradeHistory={tradeHistory}
+            onClearHistory={handleResetSession}
+            autoMatchesConfig={autoMatchesConfig}
+            onAutoMatchesConfigChange={(config) => {
+              setAutoMatchesConfig(config);
+              try { localStorage.setItem('deriv_auto_matches_config', JSON.stringify(config)); } catch {}
+            }}
+            accountMode={accountMode}
+            currentBalance={currentBalance}
+            onOpenCashier={() => setIsCashierOpen(true)}
+          />
         )}
 
-        {/* View 3: Strongest Market Scanner Dedicated */}
-        {activeTab === 'SCANNER' && (
-          <div className="space-y-6">
-            <StrongestMarketScanner
-              analyses={marketAnalyses}
-              currentSymbol={currentSymbol}
-              onSelectMarket={handleSelectSymbol}
-              watchlist={watchlist}
-              onToggleWatchlist={handleToggleWatchlist}
-              isRunning={activeBot === 'STRONGEST_WIN'}
-              onToggleRun={handleToggleStrongestBot}
-              onApplySignalToRecovery={() => setActiveTab('RECOVERY')}
-            />
-            
-            {/* Quick Chart View for Selected Market */}
-            <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60">
-              <LiveChart
-                prices={prices}
-                digits={digits}
-                symbol={currentSymbol}
-                pip={pip}
-                currentPrice={currentPrice}
-              />
-            </div>
-          </div>
+        <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60 space-y-4">
+          <LiveChart prices={prices} digits={digits} symbol={currentSymbol} pip={pip} currentPrice={currentPrice} />
+          {currentAnalysis && <IndicatorsPanel analysis={currentAnalysis} pip={pip} />}
+        </div>
+
+        {(activeTab === 'OVERVIEW' || activeTab === 'MATCHES') && (
+          <MatchesDigitAnalyzer
+            digitStats={sampleAnalysis.digitStats}
+            hotDigit={sampleAnalysis.hotDigit}
+            coldDigit={sampleAnalysis.coldDigit}
+            evenPct={sampleAnalysis.evenPct}
+            oddPct={sampleAnalysis.oddPct}
+            overPct={sampleAnalysis.overPct}
+            underPct={sampleAnalysis.underPct}
+            recentDigits={digits}
+            sampleSize={sampleSize}
+            onSampleSizeChange={setSampleSize}
+          />
         )}
 
-        {/* View 4: Matches & Differs Digit Engine Dedicated */}
-        {activeTab === 'MATCHES' && (
-          <div className="space-y-6">
-            <MatchesDigitAnalyzer
-              digitStats={sampleAnalysis.digitStats}
-              hotDigit={sampleAnalysis.hotDigit}
-              coldDigit={sampleAnalysis.coldDigit}
-              evenPct={sampleAnalysis.evenPct}
-              oddPct={sampleAnalysis.oddPct}
-              overPct={sampleAnalysis.overPct}
-              underPct={sampleAnalysis.underPct}
-              recentDigits={digits}
-              sampleSize={sampleSize}
-              onSampleSizeChange={(size) => setSampleSize(size)}
-            />
-
-            <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60">
-              <LiveChart
-                prices={prices}
-                digits={digits}
-                symbol={currentSymbol}
-                pip={pip}
-                currentPrice={currentPrice}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* View 5: Super Recovery X2 / X4 Dedicated */}
-        {activeTab === 'RECOVERY' && (
-          <div className="space-y-6">
-            <SuperRecoveryManager
-              currentSymbol={currentSymbol}
-              currentPrice={currentPrice}
-              lastDigit={lastDigit}
-              recommendedContract={currentAnalysis?.recommendedContract || 'DIFFERS'}
-              recommendedTarget={currentAnalysis?.recommendedTarget || 5}
-              onSimulateTrade={handleSimulateTrade}
-              tradeHistory={tradeHistory}
-              sessionStats={sessionStats}
-              onResetSession={handleResetSession}
-              autoNextTrade={autoNextTrade}
-              onToggleAutoNextTrade={handleToggleAutoNextTrade}
-              autoRecoveryNotice={autoRecoveryNotice}
-              onDismissNotice={() => setAutoRecoveryNotice(null)}
-              onConfigChange={handleRecoveryConfigChange}
-              isRunning={activeBot === 'SUPER_RECOVERY' || autoNextTrade}
-              onToggleRun={handleToggleSuperRecoveryBot}
-            />
-
-            <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60">
-              <LiveChart
-                prices={prices}
-                digits={digits}
-                symbol={currentSymbol}
-                pip={pip}
-                currentPrice={currentPrice}
-              />
-            </div>
-          </div>
+        {(activeTab === 'OVERVIEW' || activeTab === 'RECOVERY') && (
+          <SuperRecoveryManager
+            currentSymbol={currentSymbol}
+            currentPrice={currentPrice}
+            lastDigit={lastDigit}
+            recommendedContract={currentAnalysis?.recommendedContract || 'DIFFERS'}
+            recommendedTarget={currentAnalysis?.recommendedTarget ?? 5}
+            onSimulateTrade={handlePlaceTrade}
+            tradeHistory={tradeHistory}
+            sessionStats={sessionStats}
+            onResetSession={handleResetSession}
+            autoNextTrade={autoNextTrade}
+            onToggleAutoNextTrade={handleToggleAutoNextTrade}
+            autoRecoveryNotice={autoRecoveryNotice}
+            onDismissNotice={() => setAutoRecoveryNotice(null)}
+            onConfigChange={handleRecoveryConfigChange}
+            isRunning={activeBot === 'SUPER_RECOVERY'}
+            onToggleRun={handleToggleSuperRecoveryBot}
+          />
         )}
       </main>
 
-      {/* Persistent Watchlist Side Panel */}
       <WatchlistPanel
         isOpen={isWatchlistOpen}
         onClose={() => setIsWatchlistOpen(false)}
@@ -1786,17 +964,16 @@ export default function App() {
         onToggleWatchlist={handleToggleWatchlist}
         analyses={marketAnalyses}
         currentSymbol={currentSymbol}
-        onSelectMarket={(sym) => {
-          handleSelectSymbol(sym);
+        onSelectMarket={(symbol) => {
+          handleSelectSymbol(symbol);
           setIsWatchlistOpen(false);
         }}
-        onApplyToRecovery={(analysis) => {
+        onApplyToRecovery={() => {
           setActiveTab('RECOVERY');
           setIsWatchlistOpen(false);
         }}
       />
 
-      {/* Deriv Account Authentication Modal */}
       <DerivAccountModal
         isOpen={isConnectModalOpen}
         onClose={() => setIsConnectModalOpen(false)}
@@ -1804,39 +981,22 @@ export default function App() {
         connected={connected}
         latency={latency}
         accountMode={accountMode}
-        onToggleAccountMode={(mode) => {
-          setAccountMode(mode);
-          try {
-            localStorage.setItem('deriv_account_mode', mode);
-          } catch {}
-        }}
+        onToggleAccountMode={handleToggleAccountMode}
         demoBalance={demoBalance}
-        onUpdateDemoBalance={(newBal) => {
-          setDemoBalance(newBal);
-          try {
-            localStorage.setItem('deriv_demo_balance', newBal.toString());
-          } catch {}
-        }}
+        onUpdateDemoBalance={() => {}}
       />
 
-      {/* Deriv Cashier Modal (Deposit & Withdraw) */}
       <DerivCashierModal
         isOpen={isCashierOpen}
         onClose={() => setIsCashierOpen(false)}
         accountInfo={accountInfo}
         accountMode={accountMode}
-        balance={accountMode === 'DEMO' ? demoBalance : realBalance}
-        onDepositSuccess={handleDepositSuccess}
-        onWithdrawSuccess={handleWithdrawSuccess}
-        onToggleAccountMode={(mode) => {
-          setAccountMode(mode);
-          try {
-            localStorage.setItem('deriv_account_mode', mode);
-          } catch {}
-        }}
+        balance={currentBalance}
+        onDepositSuccess={() => showNotice('Balance changes are accepted only from Deriv.')}
+        onWithdrawSuccess={() => showNotice('Balance changes are accepted only from Deriv.')}
+        onToggleAccountMode={handleToggleAccountMode}
       />
 
-      {/* User Authentication & Account Modal */}
       <AuthModal
         isOpen={isAuthOpen}
         onClose={() => setIsAuthOpen(false)}
@@ -1844,81 +1004,41 @@ export default function App() {
         currentUser={userProfile}
       />
 
-      {/* Floating Auto-Matches Sniper Control Bar (Pixel-Perfect from Image 2) */}
       <FloatingAutoMatchesBar
-        isRunning={activeBot === 'AUTO_MATCHES' || autoMatchesActive}
-        onToggleRun={(running) => {
-          setAutoMatchesActive(running);
-          setActiveBot(running ? 'AUTO_MATCHES' : 'NONE');
-          if (running) {
-            setAutoRecoveryNotice(
-              '🎯 Auto-Matches Bot Running: Sniping digit matches on live Deriv ticks with 1-tick settlement.'
-            );
-          } else {
-            setAutoRecoveryNotice('Auto-Matches Bot Stopped.');
-            setTimeout(() => setAutoRecoveryNotice(null), 3000);
-          }
-        }}
+        isRunning={autoMatchesActive}
+        onToggleRun={handleToggleAutoMatches}
         config={autoMatchesConfig}
-        onConfigChange={(newCfg) => {
-          setAutoMatchesConfig(newCfg);
-          try {
-            localStorage.setItem('deriv_auto_matches_config', JSON.stringify(newCfg));
-          } catch {}
+        onConfigChange={(config) => {
+          setAutoMatchesConfig(config);
+          try { localStorage.setItem('deriv_auto_matches_config', JSON.stringify(config)); } catch {}
         }}
         currentSymbol={currentSymbol}
-        lastDigit={lastDigit}
-        targetDigit={
-          autoMatchesConfig.targetStrategy === 'REPEAT_ENTRY'
-            ? lastDigit
-            : sampleAnalysis.hotDigit !== undefined
-            ? sampleAnalysis.hotDigit
-            : lastDigit
-        }
-        totalMatchesWon={
-          tradeHistory.filter((t) => t.contractType === 'MATCHES' && t.status === 'WON').length
-        }
+        lastDigit={currentPrice > 0 ? lastDigit : undefined}
+        targetDigit={currentAnalysis?.hotDigit}
+        totalMatchesWon={tradeHistory.filter((trade) => trade.contractType === 'MATCHES' && trade.status === 'WON').length}
         netProfit={sessionStats.netProfit}
         onOpenSafetyModal={() => setIsSafetyModalOpen(true)}
       />
 
-      {/* Auto-Matches Safety & Risk Controls Modal */}
       <AutoMatchesSafetyModal
         isOpen={isSafetyModalOpen}
         onClose={() => setIsSafetyModalOpen(false)}
         config={autoMatchesConfig}
-        onConfigChange={(newCfg) => {
-          setAutoMatchesConfig(newCfg);
-          try {
-            localStorage.setItem('deriv_auto_matches_config', JSON.stringify(newCfg));
-          } catch {}
-        }}
+        onConfigChange={(config) => setAutoMatchesConfig(config)}
         profitLockEnabled={autoRecoveryConfigRef.current.profitLockEnabled ?? true}
-        onToggleProfitLock={(enabled) => {
-          autoRecoveryConfigRef.current.profitLockEnabled = enabled;
-        }}
+        onToggleProfitLock={(enabled) => { autoRecoveryConfigRef.current.profitLockEnabled = enabled; }}
         profitLockTarget={autoRecoveryConfigRef.current.profitLockTarget ?? 50}
-        onProfitLockTargetChange={(target) => {
-          autoRecoveryConfigRef.current.profitLockTarget = target;
-        }}
+        onProfitLockTargetChange={(target) => { autoRecoveryConfigRef.current.profitLockTarget = target; }}
         stopLoss={autoRecoveryConfigRef.current.stopLoss}
-        onStopLossChange={(sl) => {
-          autoRecoveryConfigRef.current.stopLoss = sl;
-        }}
+        onStopLossChange={(value) => { autoRecoveryConfigRef.current.stopLoss = value; }}
         currentNetProfit={sessionStats.netProfit}
         currentDrawdown={sessionStats.cumulativeLoss}
       />
 
-      {/* Footer with Protocol Verification */}
       <footer className="border-t border-slate-900 bg-slate-950 py-4 px-4 sm:px-6 text-xs text-slate-500 font-mono">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
-            <span>Deriv WebSocket Real-Time Stream Engine • 100% Real Ticks Processing</span>
-          </div>
-          <div>
-            Same-Loss-Price Super Recovery X2/X4 Protocol • Zero Synthetic Randomization
-          </div>
+          <div className="flex items-center gap-2"><ShieldCheck className="w-4 h-4 text-emerald-400" /><span>Deriv WebSocket feed • no generated market ticks</span></div>
+          <div>Contract results and balance updates come from Deriv settlement/account messages.</div>
         </div>
       </footer>
     </div>
