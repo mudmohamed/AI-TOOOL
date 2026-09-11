@@ -71,48 +71,14 @@ export const Header: React.FC<HeaderProps> = ({
     ? accountInfo.isVirtual
       ? 'DEMO'
       : 'REAL'
-    : 'REAL';
+    : 'DEMO';
   const displayBalance = accountInfo?.isAuthorized && accountInfo.balance !== undefined
     ? accountInfo.balance.toFixed(2)
     : '—';
 
   const selectTradingMode = React.useCallback((requested: AccountMode) => {
-    if (accountInfo?.isAuthorized) {
-      const currentIsRequested = requested === actualMode;
-      const linked = accountInfo.accountsList || [];
-      const match = linked.find((account) => requested === 'DEMO' ? account.is_virtual : !account.is_virtual);
-      if (currentIsRequested || match) {
-        onToggleAccountMode(requested);
-        return;
-      }
-    }
-
-    try {
-      localStorage.setItem('deriv_requested_mode', requested);
-    } catch {}
-    window.location.assign(derivService.getOAuthRedirectUrl());
-  }, [accountInfo, actualMode, onToggleAccountMode]);
-
-  React.useEffect(() => {
-    if (!accountInfo?.isAuthorized) return;
-
-    let requested: AccountMode | null = null;
-    try {
-      const saved = localStorage.getItem('deriv_requested_mode');
-      requested = saved === 'DEMO' || saved === 'REAL' ? saved : null;
-    } catch {}
-    if (!requested) return;
-
-    if (requested === actualMode) {
-      try { localStorage.removeItem('deriv_requested_mode'); } catch {}
-      return;
-    }
-
-    const linked = accountInfo.accountsList || [];
-    const match = linked.find((account) => requested === 'DEMO' ? account.is_virtual : !account.is_virtual);
-    if (match) onToggleAccountMode(requested);
-    try { localStorage.removeItem('deriv_requested_mode'); } catch {}
-  }, [accountInfo?.isAuthorized, accountInfo?.loginId, accountInfo?.accountsList, actualMode, onToggleAccountMode]);
+    onToggleAccountMode(requested);
+  }, [onToggleAccountMode]);
 
   const getActiveBotLabel = () => {
     switch (activeBot) {
@@ -195,7 +161,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             {accountInfo?.isAuthorized && (
-              <button onClick={() => derivService.logout()} className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10" title="Sign out of Deriv account">
+              <button onClick={() => derivService.logout()} className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10" title="Disconnect this Matrix account session">
                 <LogOut className="w-3.5 h-3.5" />
               </button>
             )}
