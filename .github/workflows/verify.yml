@@ -23,3 +23,15 @@ jobs:
         run: npm run lint
       - name: Production build
         run: npm run build
+      - name: Package complete verified system
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DERIV-MATRIX-FULL-SYSTEM
+          path: |
+            .
+            !node_modules/**
+            !.git/**
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
