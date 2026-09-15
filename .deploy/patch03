@@ -1,0 +1,382 @@
+rn {
++        ok: false,
++        code: error?.code || `HTTP_${otpResponse.status}`,
++        error: error?.message || 'Deriv could not create the authenticated trading WebSocket session.',
++      };
++    }
++
++    const wsUrl = String(otpPayload?.data?.url || otpPayload?.data?.ws_url || '');
++    if (!wsUrl.startsWith('wss://')) {
++      return { ok: false, code: 'INVALID_OTP_RESPONSE', error: 'Deriv returned no authenticated WebSocket URL.' };
++    }
++
++    return { ok: true, account, accounts, ws_url: wsUrl };
++  }
++
++  private async requestSession(
++    mode: AccountMode,
++    accountId?: string,
++    silent = false,
++  ): Promise<SessionResponse> {
++    const body: Record<string, string> = { mode: mode.toLowerCase() };
++    if (accountId) body.accountId = accountId;
++    if (this.apiToken) body.token = this.apiToken;
++    if (this.appId) body.appId = this.appId;
++
++    // Preferred path: included same-origin serverless bridge. PAT/OAuth tokens never enter a WS query string.
++    try {
++      const response = await fetch('/api/deriv/session', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
++        credentials: 'same-origin',
++        body: JSON.stringify(body),
++      });
++      const payload = await response.json().catch(() => ({}));
++      if (response.ok && payload?.ok) return payload as SessionResponse;
++
++      // If the deployment does not host /api (for example plain static preview), fall back to direct official REST for PAT.
++      if (response.status !== 404 && response.status !== 405) {
++        return {
++          ok: false,
++          code: payload?.code || `HTTP_${response.status}`,
++          error: payload?.error || 'Deriv account session could not be created.',
++        };
++      }
++    } catch (error) {
++      if (!this.apiToken && !silent) {
++        console.warn('[DerivWS Account] Same-origin session bridge unavailable:', error);
++      }
++    }
++
++    if (!this.apiToken) {
++      return {
++        ok: false,
++        code: 'AUTH_REQUIRED',
++        error: silent ? '' : 'Connect with Deriv OAuth or paste a Personal Access Token.',
++      };
++    }
++
++    return this.directDerivSession(this.apiToken, this.appId, mode, accountId);
++  }
++
++  private applySession(session: SessionResponse, mode: AccountMode): boolean {
++    if (!session.ok || !session.account || !session.ws_url) return false;
++
++    const account = session.account;
++    const accounts = session.accounts || [account];
++    this.preferredMode = account.account_type === 'demo' ? 'DEMO' : 'REAL';
++    this.selectedAccountId = account.account_id;
++    this.accountReconnectAttempts = 0;
++
++    try {
++      sessionStorage.setItem('deriv_account_mode', this.preferredMode);
++      sessionStorage.setItem('deriv_account_id', this.selectedAccountId);
++    } catch {}
++
++    this.accountInfo = {
++      isAuthorized: true,
++      appId: this.appId || 'oauth2',
++      loginId: account.account_id,
++      currency: account.currency || 'USD',
++      balance: Number(account.balance ?? 0),
++      isVirtual: account.account_type === 'demo',
++      accountsList: accounts.map((item) => ({
++        loginid: item.account_id,
++        currency: item.currency || 'USD',
++        is_virtual: item.account_type === 'demo',
++      })),
++    };
++
++    this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
++    this.openAccountSocket(session.ws_url, mode);
++    return true;
++  }
++
++  private openAccountSocket(wsUrl: string, mode: AccountMode): void {
++    if (!wsUrl.startsWith('wss://')) {
++      this.notifyHandlers({ msg_type: 'auth_error', error: 'Invalid Deriv authenticated WebSocket URL.' });
++      return;
++    }
++
++    this.intentionalAccountClose = true;
+     if (this.accountWs) {
+       try {
++        this.accountWs.onclose = null;
+         this.accountWs.close();
+       } catch {}
+-      this.accountWs = null;
+     }
++    this.accountWs = null;
++    this.intentionalAccountClose = false;
+ 
+     try {
+-      // Primary ultra-low latency Deriv Trading WebSocket gateway
+-      const endpointBase = this.accountEndpoints[this.accountEndpointIndex];
+-      const authEndpoint = `${endpointBase}?app_id=${this.appId}`;
+-      const aws = new WebSocket(authEndpoint);
+-      this.accountWs = aws;
++      const accountWs = new WebSocket(wsUrl);
++      this.accountWs = accountWs;
+ 
+-      // Fast connection timeout fallback (3.5s)
+       const connectionTimer = setTimeout(() => {
+-        if (aws.readyState !== WebSocket.OPEN && !this.accountInfo.isAuthorized) {
+-          console.warn('[DerivWS Account] Connection slow, cycling to fallback cluster...');
+-          this.accountEndpointIndex = (this.accountEndpointIndex + 1) % this.accountEndpoints.length;
+-          try {
+-            aws.close();
+-          } catch {}
+-          // Retry on next cluster
+-          if (token) {
+-            this.openAccountSocket(token);
+-          }
++        if (this.accountWs === accountWs && accountWs.readyState !== WebSocket.OPEN) {
++          try { accountWs.close(); } catch {}
+         }
+-      }, 3500);
++      }, 10000);
+ 
+-      aws.onopen = () => {
++      accountWs.onopen = () => {
+         clearTimeout(connectionTimer);
+-        if (this.accountWs === aws) {
+-          // Immediately send authorize request with zero delay
+-          aws.send(JSON.stringify({ authorize: token.trim() }));
+-        }
++        if (this.accountWs !== accountWs) return;
++        this.notifyHandlers({ msg_type: 'account_connection_status', connected: true });
++        this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
++        this.sendAccount({ balance: 1, subscribe: 1, req_id: this.nextRequestId() });
+       };
+ 
+-      aws.onmessage = (event: MessageEvent) => {
+-        if (this.accountWs !== aws) return;
++      accountWs.onmessage = (event: MessageEvent) => {
++        if (this.accountWs !== accountWs) return;
+         try {
+-          const data = JSON.parse(event.data);
+-
+-          // Authorization Response
+-          if (data.msg_type === 'authorize') {
+-            if (data.authorize) {
+-              const mappedAccounts = Array.isArray(data.authorize.account_list)
+-                ? data.authorize.account_list.map((acc: any) => ({
+-                    loginid: acc.loginid,
+-                    currency: acc.currency,
+-                    is_virtual: Boolean(acc.is_virtual),
+-                  }))
+-                : undefined;
+-
+-              this.accountInfo = {
+-                isAuthorized: true,
+-                appId: this.appId,
+-                token: token.trim(),
+-                loginId: data.authorize.loginid,
+-                email: data.authorize.email,
+-                currency: data.authorize.currency || 'USD',
+-                balance: Number(data.authorize.balance || 0),
+-                isVirtual: Boolean(data.authorize.is_virtual),
+-                accountsList: mappedAccounts,
+-              };
+-
+-              this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+-
+-              // Subscribe to real balance stream
+-              this.sendAccount({ balance: 1, subscribe: 1 });
+-            } else if (data.error) {
+-              this.accountInfo = {
+-                isAuthorized: false,
+-                appId: this.appId,
+-              };
+-              this.notifyHandlers({
+-                msg_type: 'auth_error',
+-                error: data.error.message || 'Authorization failed. Please ensure Read and Trade permissions are selected.',
+-                code: data.error.code,
+-              });
+-            }
++          const raw = JSON.parse(event.data);
++          const data = raw?.msg_type ? raw : raw?.data?.msg_type ? raw.data : raw;
++          const error = data.error || raw?.errors?.[0];
++
++          if (error) {
++            const reqId = Number(data.req_id ?? data.echo_req?.req_id);
++            const pendingProposal = this.pendingAutoBuys.get(reqId);
++            if (pendingProposal) this.pendingAutoBuys.delete(reqId);
++            const passthrough = pendingProposal?.passthrough || data.echo_req?.passthrough;
++            this.notifyHandlers({
++              msg_type: pendingProposal || data.echo_req?.buy ? 'buy_error' : 'deriv_error',
++              error: error.message || 'Deriv trading request failed.',
++              code: error.code,
++              echo_req: data.echo_req,
++              passthrough,
++            });
+             return;
+           }
+ 
+-          // Balance updates from Deriv broker
+           if (data.msg_type === 'balance' && data.balance) {
++            const balanceValue = Number(data.balance.balance ?? data.balance);
+             this.accountInfo = {
+               ...this.accountInfo,
+-              balance: Number(data.balance.balance || 0),
++              isAuthorized: true,
++              balance: Number.isFinite(balanceValue) ? balanceValue : this.accountInfo.balance,
+               currency: data.balance.currency || this.accountInfo.currency,
+             };
+             this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+             return;
+           }
+ 
+-          // Real Contract Buy Success
++          if (data.msg_type === 'proposal' && data.proposal) {
++            const reqId = Number(data.req_id ?? data.echo_req?.req_id);
++            const pending = this.pendingAutoBuys.get(reqId);
++            this.notifyHandlers(data);
++
++            if (pending) {
++              this.pendingAutoBuys.delete(reqId);
++              const askPrice = Number(data.proposal.ask_price ?? pending.amount);
++              if (!data.proposal.id || !Number.isFinite(askPrice) || askPrice <= 0) {
++                this.notifyHandlers({
++                  msg_type: 'buy_error',
++                  error: 'Deriv returned an invalid proposal price.',
++                  passthrough: pending.passthrough,
++                });
++                return;
++              }
++              this.sendAccount({
++                buy: data.proposal.id,
++                price: askPrice,
++                passthrough: pending.passthrough,
++                req_id: this.nextRequestId(),
++              });
++            }
++            return;
++          }
++
+           if (data.msg_type === 'buy') {
+             if (data.buy) {
+               const contractId = data.buy.contract_id;
++              const passthrough = data.echo_req?.passthrough;
++
+               if (data.buy.balance_after !== undefined) {
+-                this.accountInfo = {
+-                  ...this.accountInfo,
+-                  balance: Number(data.buy.balance_after),
+-                };
++                this.accountInfo = { ...this.accountInfo, balance: Number(data.buy.balance_after) };
+                 this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+               }
+ 
+@@ -435,202 +561,208 @@ class DerivWebSocketService {
+                 msg_type: 'buy_success',
+                 buy: data.buy,
+                 echo_req: data.echo_req,
+-                passthrough: data.echo_req?.passthrough,
++                passthrough,
+               });
+ 
+-              // Subscribe to real-time official settlement stream
+-              if (contractId) {
++              if (contractId !== undefined && contractId !== null) {
+                 this.activeContractSubscriptions.add(String(contractId));
+                 this.sendAccount({
+                   proposal_open_contract: 1,
+                   contract_id: contractId,
+                   subscribe: 1,
++                  req_id: this.nextRequestId(),
+                 });
+               }
+-            } else if (data.error) {
+-              this.notifyHandlers({
+-                msg_type: 'buy_error',
+-                error: data.error.message || 'Contract purchase rejected by Deriv',
+-                code: data.error.code,
+-                echo_req: data.echo_req,
+-                passthrough: data.echo_req?.passthrough,
+-              });
+             }
+             return;
+           }
+ 
+-          // Official Settlement Stream: proposal_open_contract
+           if (data.msg_type === 'proposal_open_contract' && data.proposal_open_contract) {
+-            const poc = data.proposal_open_contract;
++            const rawContract = data.proposal_open_contract;
++            // Compatibility aliases keep the existing winning/recovery UI untouched while using the current Deriv fields.
++            const exitSpot = Number(rawContract.exit_spot ?? rawContract.exit_tick ?? rawContract.current_spot ?? 0);
++            const contract = {
++              ...rawContract,
++              underlying: rawContract.underlying || rawContract.underlying_symbol,
++              exit_tick: rawContract.exit_tick ?? exitSpot,
++              exit_tick_display_value:
++                rawContract.exit_tick_display_value ?? (exitSpot ? String(exitSpot) : undefined),
++            };
++
+             this.notifyHandlers({
+               msg_type: 'contract_update',
+-              contract: poc,
++              contract,
+               echo_req: data.echo_req,
+               passthrough: data.echo_req?.passthrough,
+             });
+ 
+-            // Settlement check: is_sold === 1 or status in won/lost/sold
+-            if (poc.is_sold === 1 || poc.status === 'won' || poc.status === 'lost') {
++            const status = String(contract.status || '').toLowerCase();
++            const settled = Boolean(contract.is_sold === 1 || contract.is_sold === true || ['won', 'lost', 'sold', 'expired'].includes(status));
++            if (settled) {
+               this.notifyHandlers({
+                 msg_type: 'contract_settled',
+-                contract: poc,
+-                contract_id: poc.contract_id,
+-                status: poc.status,
+-                profit: Number(poc.profit ?? 0),
+-                payout: Number(poc.payout ?? 0),
+-                buy_price: Number(poc.buy_price ?? 0),
+-                sell_price: Number(poc.sell_price ?? 0),
+-                exit_tick: poc.exit_tick,
+-                exit_tick_display_value: poc.exit_tick_display_value,
+-                underlying: poc.underlying,
+-                barrier: poc.barrier,
++                contract,
++                contract_id: contract.contract_id,
++                status: contract.status,
++                profit: Number(contract.profit ?? 0),
++                payout: Number(contract.payout ?? 0),
++                buy_price: Number(contract.buy_price ?? 0),
++                sell_price: Number(contract.sell_price ?? contract.exit_spot ?? 0),
++                exit_tick: contract.exit_tick,
++                exit_tick_display_value: contract.exit_tick_display_value,
++                underlying: contract.underlying,
++                barrier: contract.barrier,
+                 echo_req: data.echo_req,
+                 passthrough: data.echo_req?.passthrough,
+               });
+ 
+-              // Forget POC subscription to avoid leak
+-              if (poc.id) {
+-                this.sendAccount({ forget: poc.id });
+-              }
+-              if (poc.contract_id) {
+-                this.activeContractSubscriptions.delete(String(poc.contract_id));
+-              }
+-
+-              // Query updated balance from Deriv
+-              this.sendAccount({ balance: 1 });
++              if (contract.id) this.sendAccount({ forget: contract.id, req_id: this.nextRequestId() });
++              if (contract.contract_id) this.activeContractSubscriptions.delete(String(contract.contract_id));
++              this.sendAccount({ balance: 1, req_id: this.nextRequestId() });
+             }
+             return;
+           }
+ 
+-          // Proposal Response
+-          if (data.msg_type === 'proposal') {
+-            this.notifyHandlers(data);
+-            return;
+-          }
+-
+-          // General Account error / Auth Token error
+-          if (data.error) {
+-            if (data.echo_req?.authorize || data.error.code === 'InvalidTok
