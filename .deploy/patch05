@@ -1,0 +1,56 @@
+-          handler({ msg_type: 'account_update', account: this.accountInfo });
+-        }
+-      } catch (err) {
+-        console.error('[DerivWS] Error in initial listener dispatch:', err);
++        if (this.accountInfo.isAuthorized) handler({ msg_type: 'account_update', account: this.accountInfo });
++      } catch (error) {
++        console.error('[DerivWS] Error in initial listener dispatch:', error);
+       }
+-    }, 0);
+-
+-    return () => {
+-      this.messageHandlers.delete(handler);
+-    };
++    });
++    return () => this.messageHandlers.delete(handler);
+   }
+ 
+   private notifyHandlers(data: any): void {
+     this.messageHandlers.forEach((handler) => {
+       try {
+         handler(data);
+-      } catch (err) {
+-        console.error('[DerivWS] Handler error:', err);
++      } catch (error) {
++        console.error('[DerivWS] Handler error:', error);
+       }
+     });
+   }
+@@ -846,13 +968,11 @@ class DerivWebSocketService {
+   private startHeartbeat(): void {
+     this.stopHeartbeat();
+     this.ping();
+-    this.pingInterval = setInterval(() => {
+-      this.ping();
+-    }, 15000);
++    this.pingInterval = setInterval(() => this.ping(), 15000);
+   }
+ 
+   private ping(): void {
+-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
++    if (this.ws?.readyState === WebSocket.OPEN) {
+       this.lastPingTime = Date.now();
+       this.send({ ping: 1 });
+     }
+@@ -866,10 +986,7 @@ class DerivWebSocketService {
+   }
+ 
+   public getConnectionState(): { connected: boolean; latency: number } {
+-    return {
+-      connected: this.isConnected,
+-      latency: this.latency,
+-    };
++    return { connected: this.isConnected, latency: this.latency };
+   }
+ }
+ 
