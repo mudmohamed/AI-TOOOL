@@ -2,6 +2,11 @@ import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
+import { installDerivConnectionFix } from './services/derivConnectionFix';
+
+// Install only the Deriv authentication/return transport fix. Trading, scanner,
+// Matches and recovery logic remain in their existing files unchanged.
+installDerivConnectionFix();
 
 // One-time migration to the first real Matches setup supplied by the user.
 // Keep the user's stake/profit/loss limits, but restore the real Markov target
