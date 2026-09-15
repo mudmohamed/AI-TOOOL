@@ -1,0 +1,400 @@
+diff --git a/a/.env.example b/b/.env.example
+index 7a550fe..3cee02b 100644
+--- a/a/.env.example
++++ b/b/.env.example
+@@ -7,3 +7,16 @@ GEMINI_API_KEY="MY_GEMINI_API_KEY"
+ # AI Studio automatically injects this at runtime with the Cloud Run service URL.
+ # Used for self-referential links, OAuth callbacks, and API endpoints.
+ APP_URL="MY_APP_URL"
++
++# DERIV CONNECTION (current Options API)
++# For the "Login with Deriv" OAuth button, register this deployment as an OAuth2 app in Deriv
++# and add this exact callback URL in the Deriv app settings:
++#   https://YOUR-DOMAIN/api/deriv/oauth-callback
++DERIV_CLIENT_ID="YOUR_DERIV_OAUTH_CLIENT_ID"
++
++# Optional server-side default App ID for Personal Access Token (PAT) connections.
++# Users can also enter their App ID in the Connect Deriv panel.
++DERIV_APP_ID="YOUR_DERIV_APP_ID"
++
++# Optional frontend prefill only. App IDs are public identifiers, not secrets.
++VITE_DERIV_APP_ID="YOUR_DERIV_APP_ID"
+diff --git a/b/api/deriv/logout.js b/b/api/deriv/logout.js
+new file mode 100644
+index 0000000..c3dbd8e
+--- /dev/null
++++ b/b/api/deriv/logout.js
+@@ -0,0 +1,10 @@
++export default async function handler(req, res) {
++  res.setHeader('Cache-Control', 'no-store');
++  res.setHeader('Set-Cookie', [
++    'deriv_oauth_access=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
++    'deriv_oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
++    'deriv_oauth_verifier=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
++    'deriv_oauth_mode=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
++  ]);
++  return res.status(200).json({ ok: true });
++}
+diff --git a/b/api/deriv/oauth-callback.js b/b/api/deriv/oauth-callback.js
+new file mode 100644
+index 0000000..b3f0b36
+--- /dev/null
++++ b/b/api/deriv/oauth-callback.js
+@@ -0,0 +1,88 @@
++function parseCookies(header = '') {
++  const out = {};
++  for (const part of String(header).split(';')) {
++    const index = part.indexOf('=');
++    if (index < 0) continue;
++    const key = part.slice(0, index).trim();
++    const value = part.slice(index + 1).trim();
++    if (key) out[key] = decodeURIComponent(value);
++  }
++  return out;
++}
++
++function requestOrigin(req) {
++  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
++  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
++  return `${proto}://${host}`;
++}
++
++function cookie(name, value, maxAge) {
++  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
++}
++
++function popupHtml(type, mode, message = '') {
++  const safeType = JSON.stringify(type);
++  const safeMode = JSON.stringify(mode);
++  const safeMessage = JSON.stringify(message);
++  return `<!doctype html><html><head><meta charset="utf-8"><title>Deriv Connection</title></head><body style="font-family:system-ui;background:#020617;color:#e2e8f0;padding:24px"><p id="status">Returning to Deriv Matrix…</p><script>(function(){var payload={type:${safeType},mode:${safeMode},error:${safeMessage}};if(window.opener&&!window.opener.closed){window.opener.postMessage(payload,window.location.origin);setTimeout(function(){window.close();},250);}else{var q=payload.type==='DERIV_OAUTH_COMPLETE'?'?deriv_oauth=success&mode='+encodeURIComponent(payload.mode):'?deriv_oauth=error';window.location.replace('/'+q);}})();</script></body></html>`;
++}
++
++export default async function handler(req, res) {
++  res.setHeader('Cache-Control', 'no-store');
++  const cookies = parseCookies(req.headers.cookie || '');
++  const expectedState = String(cookies.deriv_oauth_state || '');
++  const verifier = String(cookies.deriv_oauth_verifier || '');
++  const mode = String(cookies.deriv_oauth_mode || 'real').toLowerCase() === 'demo' ? 'DEMO' : 'REAL';
++  const state = String(req.query?.state || '');
++  const code = String(req.query?.code || '');
++  const oauthError = String(req.query?.error_description || req.query?.error || '');
++  const clientId = String(process.env.DERIV_CLIENT_ID || '').trim();
++
++  if (oauthError) {
++    res.status(400).type('html').send(popupHtml('DERIV_OAUTH_ERROR', mode, oauthError));
++    return;
++  }
++  if (!clientId || !expectedState || !verifier || !state || state !== expectedState || !code) {
++    res.status(400).type('html').send(popupHtml('DERIV_OAUTH_ERROR', mode, 'Invalid or expired Deriv OAuth callback.'));
++    return;
++  }
++
++  const origin = requestOrigin(req);
++  const redirectUri = `${origin}/api/deriv/oauth-callback`;
++
++  try {
++    const body = new URLSearchParams({
++      grant_type: 'authorization_code',
++      client_id: clientId,
++      code,
++      code_verifier: verifier,
++      redirect_uri: redirectUri,
++    });
++
++    const tokenResponse = await fetch('https://auth.deriv.com/oauth2/token', {
++      method: 'POST',
++      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
++      body,
++    });
++    const tokenPayload = await tokenResponse.json().catch(() => ({}));
++    const accessToken = String(tokenPayload?.access_token || '');
++
++    if (!tokenResponse.ok || !accessToken) {
++      const message = tokenPayload?.error_description || tokenPayload?.error || 'Deriv token exchange failed.';
++      res.status(401).type('html').send(popupHtml('DERIV_OAUTH_ERROR', mode, message));
++      return;
++    }
++
++    const expiresIn = Math.max(60, Math.min(3600, Number(tokenPayload?.expires_in || 3600)) - 30);
++    res.setHeader('Set-Cookie', [
++      cookie('deriv_oauth_access', accessToken, expiresIn),
++      cookie('deriv_oauth_state', '', 0),
++      cookie('deriv_oauth_verifier', '', 0),
++      cookie('deriv_oauth_mode', '', 0),
++    ]);
++    res.status(200).type('html').send(popupHtml('DERIV_OAUTH_COMPLETE', mode));
++  } catch (error) {
++    const message = error instanceof Error ? error.message : 'Deriv OAuth connection failed.';
++    res.status(502).type('html').send(popupHtml('DERIV_OAUTH_ERROR', mode, message));
++  }
++}
+diff --git a/b/api/deriv/oauth-start.js b/b/api/deriv/oauth-start.js
+new file mode 100644
+index 0000000..0e2be57
+--- /dev/null
++++ b/b/api/deriv/oauth-start.js
+@@ -0,0 +1,47 @@
++import crypto from 'node:crypto';
++
++function base64url(buffer) {
++  return Buffer.from(buffer).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
++}
++
++function requestOrigin(req) {
++  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
++  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
++  return `${proto}://${host}`;
++}
++
++function cookie(name, value, maxAge = 600) {
++  return `${name}=${encodeURIComponent(value)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
++}
++
++export default async function handler(req, res) {
++  res.setHeader('Cache-Control', 'no-store');
++  const clientId = String(process.env.DERIV_CLIENT_ID || '').trim();
++  if (!clientId) {
++    return res.status(500).type('html').send(`<!doctype html><html><body style="font-family:system-ui;background:#020617;color:#e2e8f0;padding:24px"><p>Deriv OAuth is not configured on this deployment. Use PAT + App ID or set DERIV_CLIENT_ID.</p><script>if(window.opener&&!window.opener.closed){window.opener.postMessage({type:'DERIV_OAUTH_ERROR',error:'DERIV_CLIENT_ID is not configured. Use PAT + App ID or configure OAuth.'},window.location.origin);setTimeout(function(){window.close();},800);}</script></body></html>`);
++  }
++
++  const mode = String(req.query?.mode || 'real').toLowerCase() === 'demo' ? 'demo' : 'real';
++  const origin = requestOrigin(req);
++  const redirectUri = `${origin}/api/deriv/oauth-callback`;
++  const state = base64url(crypto.randomBytes(32));
++  const verifier = base64url(crypto.randomBytes(64));
++  const challenge = base64url(crypto.createHash('sha256').update(verifier).digest());
++
++  res.setHeader('Set-Cookie', [
++    cookie('deriv_oauth_state', state),
++    cookie('deriv_oauth_verifier', verifier),
++    cookie('deriv_oauth_mode', mode),
++  ]);
++
++  const url = new URL('https://auth.deriv.com/oauth2/auth');
++  url.searchParams.set('response_type', 'code');
++  url.searchParams.set('client_id', clientId);
++  url.searchParams.set('redirect_uri', redirectUri);
++  url.searchParams.set('scope', 'trade');
++  url.searchParams.set('state', state);
++  url.searchParams.set('code_challenge', challenge);
++  url.searchParams.set('code_challenge_method', 'S256');
++
++  res.redirect(302, url.toString());
++}
+diff --git a/b/api/deriv/session.js b/b/api/deriv/session.js
+new file mode 100644
+index 0000000..22cfe13
+--- /dev/null
++++ b/b/api/deriv/session.js
+@@ -0,0 +1,156 @@
++/**
++ * Current Deriv Options authentication bridge.
++ * - OAuth access token: read only from an HttpOnly same-origin cookie.
++ * - PAT: accepted only for this request, never stored on the server.
++ * - Returns only account metadata plus Deriv's short-lived OTP WebSocket URL.
++ */
++
++function parseCookies(header = '') {
++  const out = {};
++  for (const part of String(header).split(';')) {
++    const index = part.indexOf('=');
++    if (index < 0) continue;
++    const key = part.slice(0, index).trim();
++    const value = part.slice(index + 1).trim();
++    if (key) out[key] = decodeURIComponent(value);
++  }
++  return out;
++}
++
++function errorMessage(payload, fallback) {
++  return payload?.errors?.[0]?.message || payload?.error_description || payload?.error || fallback;
++}
++
++function errorCode(payload, fallback) {
++  return payload?.errors?.[0]?.code || fallback;
++}
++
++function normalizeAccounts(payload) {
++  const data = payload?.data ?? payload;
++  const list = Array.isArray(data)
++    ? data
++    : Array.isArray(data?.accounts)
++    ? data.accounts
++    : data?.account_id
++    ? [data]
++    : [];
++
++  return list
++    .map((account) => ({
++      account_id: String(account.account_id ?? account.loginid ?? ''),
++      account_type: String(account.account_type ?? (account.is_virtual ? 'demo' : 'real')).toLowerCase(),
++      balance: account.balance,
++      currency: account.currency || 'USD',
++      status: account.status,
++    }))
++    .filter((account) => account.account_id);
++}
++
++export default async function handler(req, res) {
++  res.setHeader('Cache-Control', 'no-store');
++
++  if (req.method !== 'POST') {
++    res.setHeader('Allow', 'POST');
++    return res.status(405).json({ ok: false, code: 'METHOD_NOT_ALLOWED', error: 'POST required.' });
++  }
++
++  let body = req.body || {};
++  if (typeof body === 'string') {
++    try { body = JSON.parse(body); } catch { body = {}; }
++  }
++
++  const cookies = parseCookies(req.headers.cookie || '');
++  const pat = String(body.token || '').trim();
++  const oauthToken = String(cookies.deriv_oauth_access || '').trim();
++  const token = pat || oauthToken;
++  const appId = String(body.appId || process.env.DERIV_APP_ID || '').trim();
++  const mode = String(body.mode || 'real').toLowerCase() === 'demo' ? 'demo' : 'real';
++  const requestedAccountId = String(body.accountId || '').trim();
++
++  if (!token) {
++    return res.status(401).json({
++      ok: false,
++      code: 'AUTH_REQUIRED',
++      error: 'No Deriv OAuth session or Personal Access Token is available.',
++    });
++  }
++
++  if (pat && !appId) {
++    return res.status(400).json({
++      ok: false,
++      code: 'APP_ID_REQUIRED',
++      error: 'Your Deriv App ID is required when using a Personal Access Token.',
++    });
++  }
++
++  const headers = {
++    Authorization: `Bearer ${token}`,
++    Accept: 'application/json',
++  };
++  if (pat && appId) headers['Deriv-App-ID'] = appId;
++
++  try {
++    const accountsResponse = await fetch('https://api.derivws.com/trading/v1/options/accounts', {
++      method: 'GET',
++      headers,
++    });
++    const accountsPayload = await accountsResponse.json().catch(() => ({}));
++
++    if (!accountsResponse.ok) {
++      return res.status(accountsResponse.status).json({
++        ok: false,
++        code: errorCode(accountsPayload, `HTTP_${accountsResponse.status}`),
++        error: errorMessage(accountsPayload, 'Unable to read Deriv Options accounts.'),
++      });
++    }
++
++    const accounts = normalizeAccounts(accountsPayload);
++    const account = requestedAccountId
++      ? accounts.find((item) => item.account_id === requestedAccountId && item.account_type === mode)
++      : accounts.find((item) => item.account_type === mode);
++
++    if (!account) {
++      return res.status(404).json({
++        ok: false,
++        code: 'ACCOUNT_NOT_FOUND',
++        error: `No ${mode.toUpperCase()} Deriv Options account is available for this login.`,
++      });
++    }
++
++    const otpResponse = await fetch(
++      `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(account.account_id)}/otp`,
++      { method: 'POST', headers },
++    );
++    const otpPayload = await otpResponse.json().catch(() => ({}));
++
++    if (!otpResponse.ok) {
++      return res.status(otpResponse.status).json({
++        ok: false,
++        code: errorCode(otpPayload, `HTTP_${otpResponse.status}`),
++        error: errorMessage(otpPayload, 'Deriv could not create the authenticated WebSocket session.'),
++      });
++    }
++
++    const wsUrl = String(otpPayload?.data?.url || otpPayload?.data?.ws_url || '');
++    if (!wsUrl.startsWith('wss://api.derivws.com/')) {
++      return res.status(502).json({
++        ok: false,
++        code: 'INVALID_OTP_RESPONSE',
++        error: 'Deriv returned an invalid authenticated WebSocket URL.',
++      });
++    }
++
++    return res.status(200).json({
++      ok: true,
++      account,
++      accounts,
++      ws_url: wsUrl,
++    });
++  } catch (error) {
++    return res.status(502).json({
++      ok: false,
++      code: 'DERIV_UPSTREAM_ERROR',
++      error: error instanceof Error ? error.message : 'Unable to reach Deriv.',
++    });
++  }
++}
+diff --git a/a/src/App.tsx b/b/src/App.tsx
+index 27c019a..11d3928 100644
+--- a/a/src/App.tsx
++++ b/b/src/App.tsx
+@@ -409,10 +409,22 @@ export default function App() {
+     const payoutPreset =
+       tradeData.payout || CONTRACT_PAYOUT_PRESETS[tradeData.contractType]?.payoutRate || 1.95;
+ 
+-    const isRealLiveOrder = accountMode === 'REAL' && !!accountInfo?.isAuthorized;
++    const brokerAccountMatchesMode =
++      !!accountInfo?.isAuthorized &&
++      (accountMode === 'DEMO' ? !!accountInfo.isVirtual : !accountInfo.isVirtual);
++    const isRealLiveOrder = brokerAccountMatchesMode;
++
++    // REAL mode must never fall back to a browser-simulated order.
++    if (accountMode === 'REAL' && !brokerAccountMatchesMode) {
++      setAutoRecoveryNotice('Connect your Deriv REAL account before placing a real-money order.');
++      setIsConnectModalOpen(true);
++      isDispatchingTradeRef.current = false;
++      return;
++    }
+ 
+-    // Deduct stake upon order placement
+-    if (accountMode === 'DEMO') {
++    // Only unauthenticated DEMO is local practice. Authenticated Deriv DEMO/REAL balances
++    // are broker-owned and come from Deriv's balance stream.
++    if (accountMode === 'DEMO' && !brokerAccountMatchesMode) {
+       setDemoBalance((prev) => {
+         const nextBal = Math.max(0, Number((prev - tradeData.stake).toFixed(2)));
+         try {
+@@ -420,18 +432,6 @@ export default function App() {
+         } catch {}
+         return nextBal;
+       });
+-    } else {
+-      setRealBalance((prev) => {
+-        const nextBal = Math.max(0, Number((prev - tradeData.stake).toFixed(2)));
+-        try {
+-          localStorage.setItem('deriv_real_balance', nextBal.toString());
+-        } catch {}
+-        return nextBal;
+-      });
+-      setAccountInfo((prev) => ({
+-        ...prev,
+-        balance: Math.max(0, Number(((prev.balance || 0) - tradeData.stake).toFixed(2))),
+-      }));
+     }
+ 
+     const tradeUniqueId = `trade-${Date.now()}-${performance.now().toString(36).replace('.', '')}`;
+@@ -824,29 +824,17 @@ export default function App() {
+       const won = trade.status === 'WON';
+       if (won) hadWin = true;
+ 
+-      // Credit balance upon w
