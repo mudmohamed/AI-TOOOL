@@ -1,0 +1,406 @@
+OAuthCallback();
+-
+     try {
+-      const savedAppId = localStorage.getItem('deriv_app_id');
+-      const savedToken = localStorage.getItem('deriv_api_token');
+-      if (savedAppId) {
+-        this.appId = savedAppId;
+-      }
+-      if (savedToken) {
+-        this.apiToken = savedToken;
+-      }
++      const envAppId = String(import.meta.env.VITE_DERIV_APP_ID || '').trim();
++      const savedAppId = localStorage.getItem('deriv_app_id') || '';
++      const savedToken = sessionStorage.getItem('deriv_api_token') || '';
++      const savedMode = sessionStorage.getItem('deriv_account_mode');
++      const savedAccount = sessionStorage.getItem('deriv_account_id') || '';
++
++      this.appId = envAppId || savedAppId;
++      this.apiToken = savedToken;
++      this.selectedAccountId = savedAccount;
++      if (savedMode === 'DEMO' || savedMode === 'REAL') this.preferredMode = savedMode;
+     } catch {
+-      // localStorage may not be accessible in all environments
++      // Storage can be unavailable in hardened browser contexts.
+     }
+ 
+-    if (this.apiToken) {
+-      this.openAccountSocket(this.apiToken);
++    if (typeof window !== 'undefined') {
++      window.addEventListener('message', (event: MessageEvent) => {
++        if (event.origin !== window.location.origin) return;
++        const payload = event.data || {};
++        if (payload.type === 'DERIV_OAUTH_COMPLETE') {
++          const mode: AccountMode = String(payload.mode).toUpperCase() === 'DEMO' ? 'DEMO' : 'REAL';
++          void this.restoreAccountSession(mode);
++        }
++        if (payload.type === 'DERIV_OAUTH_ERROR') {
++          this.notifyHandlers({
++            msg_type: 'auth_error',
++            error: payload.error || 'Deriv OAuth authorization failed.',
++          });
++        }
++      });
+     }
+ 
+     this.connect();
++
++    // Restore a PAT session for this browser tab, or an OAuth HttpOnly-cookie session.
++    queueMicrotask(() => {
++      void this.restoreAccountSession(this.preferredMode, true);
++    });
++  }
++
++  private nextRequestId(): number {
++    this.requestId += 1;
++    return this.requestId;
++  }
++
++  /** Legacy callback tokens are deliberately not parsed. Current OAuth uses code + PKCE server-side. */
++  public parseOAuthCallback(): boolean {
++    return false;
+   }
+ 
+   /**
+-   * Parses tokens and accounts if redirected back from official Deriv OAuth:
+-   * e.g. ?acct1=CR123&token1=xxx&cur1=USD&acct2=VRTC456&token2=yyy&cur2=USD
++   * Starts the current Deriv OAuth2 + PKCE flow through the included same-origin serverless bridge.
++   * The callback posts DERIV_OAUTH_COMPLETE back to this app and the app requests an OTP session.
+    */
+-  public parseOAuthCallback(): boolean {
+-    if (typeof window === 'undefined') return false;
++  public getOAuthRedirectUrl(_customAppId?: string): string {
++    const mode = this.preferredMode.toLowerCase();
++    return `/api/deriv/oauth-start?mode=${encodeURIComponent(mode)}`;
++  }
+ 
++  public setAppId(appId: string): void {
++    this.appId = String(appId || '').trim();
+     try {
+-      let queryString = '';
+-      if (window.location.search && window.location.search.includes('token')) {
+-        queryString = window.location.search.replace(/^\?/, '');
+-      } else if (window.location.hash && window.location.hash.includes('token')) {
+-        queryString = window.location.hash.replace(/^#/, '');
+-        if (queryString.includes('?')) {
+-          queryString = queryString.split('?')[1];
+-        }
+-      }
+-
+-      if (!queryString) return false;
+-
+-      const params = new URLSearchParams(queryString);
+-      const accountsList: Array<{ loginid: string; currency: string; is_virtual: boolean; token?: string }> = [];
+-      let primaryToken = '';
+-      let index = 1;
+-
+-      while (params.has(`acct${index}`) && params.has(`token${index}`)) {
+-        const loginid = params.get(`acct${index}`) || '';
+-        const token = params.get(`token${index}`) || '';
+-        const currency = params.get(`cur${index}`) || 'USD';
+-        const is_virtual = loginid.startsWith('VRTC') || loginid.startsWith('VR');
+-
+-        if (token) {
+-          accountsList.push({ loginid, currency, is_virtual, token });
+-        }
+-        index++;
+-      }
+-
+-      // Prioritize Real Account (CR...) over virtual demo (VRTC...)
+-      const realAcc = accountsList.find((a) => !a.is_virtual && a.token);
+-      if (realAcc && realAcc.token) {
+-        primaryToken = realAcc.token;
+-      } else if (accountsList.length > 0 && accountsList[0].token) {
+-        primaryToken = accountsList[0].token;
+-      }
+-
+-      // Also check single token param ?token=...
+-      if (accountsList.length === 0 && params.has('token')) {
+-        const singleToken = params.get('token') || '';
+-        const singleAcct = params.get('acct') || 'CR';
+-        if (singleToken) {
+-          primaryToken = singleToken;
+-          accountsList.push({
+-            loginid: singleAcct,
+-            currency: params.get('cur') || 'USD',
+-            is_virtual: singleAcct.startsWith('VR'),
+-            token: singleToken,
+-          });
+-        }
+-      }
+-
+-      if (primaryToken && accountsList.length > 0) {
+-        this.apiToken = primaryToken;
+-        try {
+-          localStorage.setItem('deriv_api_token', primaryToken);
+-          localStorage.setItem('deriv_accounts_list', JSON.stringify(accountsList));
+-        } catch {}
+-
+-        const cleanUrl = window.location.pathname;
+-        window.history.replaceState({}, document.title, cleanUrl);
+-
+-        console.log(`[DerivWS] Authenticated directly via Deriv OAuth with ${accountsList.length} accounts`);
+-        return true;
+-      }
+-    } catch (e) {
+-      console.warn('[DerivWS] Error parsing Deriv OAuth callback params:', e);
+-    }
+-    return false;
++      if (this.appId) localStorage.setItem('deriv_app_id', this.appId);
++      else localStorage.removeItem('deriv_app_id');
++    } catch {}
+   }
+ 
+-  public getOAuthRedirectUrl(customAppId?: string): string {
+-    const id = customAppId || this.appId || '1089';
+-    return `https://oauth.deriv.com/oauth2/authorize?app_id=${id}&l=EN&brand=deriv`;
++  public getAppId(): string {
++    return this.appId;
+   }
+ 
++  public setPreferredMode(mode: AccountMode): void {
++    this.preferredMode = mode === 'DEMO' ? 'DEMO' : 'REAL';
++    try {
++      sessionStorage.setItem('deriv_account_mode', this.preferredMode);
++    } catch {}
++  }
+ 
+-  /**
+-   * Connect to Deriv's Public WebSocket streaming cluster
+-   */
++  /** Connect to Deriv's real public market-data stream. */
+   public connect(): void {
+-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+-      return;
+-    }
++    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+ 
+     const endpoint = this.publicEndpoints[this.publicEndpointIndex % this.publicEndpoints.length];
+-    const fullUrl = endpoint.includes('/public')
++    const fullUrl = endpoint.includes('/public') || !this.appId
+       ? endpoint
+-      : `${endpoint}?app_id=${this.appId}`;
++      : `${endpoint}?app_id=${encodeURIComponent(this.appId)}`;
+ 
+     try {
+-      this.ws = new WebSocket(fullUrl);
++      const publicWs = new WebSocket(fullUrl);
++      this.ws = publicWs;
+ 
+-      this.ws.onopen = () => {
++      publicWs.onopen = () => {
++        if (this.ws !== publicWs) return;
+         this.isConnected = true;
+         this.notifyHandlers({ msg_type: 'connection_status', connected: true });
+         this.startHeartbeat();
+ 
+-        // 1. Fetch live active symbols
+         this.send({ active_symbols: 'brief' });
+-
+-        // 2. Request deep tick history for initial symbol
+         this.requestTickHistory('1HZ10V', 1000);
+-
+-        // 3. Subscribe to real live ticks across all popular synthetic markets
+-        this.subscribedSymbols.forEach((sym) => {
+-          this.send({ ticks: sym, subscribe: 1 });
+-        });
+-
+-        // 4. If an account token exists, open authenticated trading session
+-        if (this.apiToken) {
+-          this.openAccountSocket(this.apiToken);
+-        }
++        this.subscribedSymbols.forEach((symbol) => this.send({ ticks: symbol, subscribe: 1 }));
+       };
+ 
+-      this.ws.onmessage = (event: MessageEvent) => {
++      publicWs.onmessage = (event: MessageEvent) => {
++        if (this.ws !== publicWs) return;
+         try {
+-          const data = JSON.parse(event.data);
++          const raw = JSON.parse(event.data);
++          const data = raw?.msg_type ? raw : raw?.data?.msg_type ? raw.data : raw;
+ 
+-          // Latency ping
+           if (data.msg_type === 'ping') {
+-            this.latency = Math.max(12, Date.now() - this.lastPingTime);
++            this.latency = this.lastPingTime ? Math.max(0, Date.now() - this.lastPingTime) : 0;
+             this.notifyHandlers({ msg_type: 'latency_update', latency: this.latency });
+             return;
+           }
+ 
+-          // Active Symbols Response
+           if (data.msg_type === 'active_symbols' && Array.isArray(data.active_symbols)) {
+-            data.active_symbols.forEach((sym: any) => {
+-              const symbolName = sym.symbol || sym.underlying_symbol;
+-              const pip = Number(sym.pip_size ?? sym.pip ?? 2);
+-              if (symbolName && !isNaN(pip)) {
+-                this.symbolPipSizes.set(symbolName, pip);
+-              }
++            data.active_symbols.forEach((symbol: any) => {
++              const symbolName = symbol.symbol || symbol.underlying_symbol;
++              const pip = Number(symbol.pip_size ?? symbol.pip ?? 2);
++              if (symbolName && Number.isFinite(pip)) this.symbolPipSizes.set(symbolName, pip);
+             });
+             this.notifyHandlers(data);
+             return;
+           }
+ 
+-          // History Response (100% real tick series from Deriv)
+           if (data.msg_type === 'history' && data.history) {
+-            const sym = data.echo_req?.ticks_history;
+-            if (sym && data.pip_size !== undefined) {
+-              this.symbolPipSizes.set(sym, Number(data.pip_size));
+-            }
++            const symbol = data.echo_req?.ticks_history;
++            if (symbol && data.pip_size !== undefined) this.symbolPipSizes.set(symbol, Number(data.pip_size));
+             this.notifyHandlers(data);
+             return;
+           }
+ 
+-          // Real Incoming Tick Quote
+           if (data.msg_type === 'tick' && data.tick) {
+             const tick = data.tick;
+             if (tick.symbol && tick.quote !== undefined) {
+               this.symbolCurrentPrices.set(tick.symbol, Number(tick.quote));
+-              if (tick.pip_size !== undefined) {
+-                this.symbolPipSizes.set(tick.symbol, Number(tick.pip_size));
+-              }
++              if (tick.pip_size !== undefined) this.symbolPipSizes.set(tick.symbol, Number(tick.pip_size));
+             }
+             this.notifyHandlers(data);
+             return;
+           }
+ 
+-          // API Error handling & automatic fallback cycling
+-          if (data.error) {
+-            console.warn('[DerivWS Public] API message error:', data.error);
+-            if (data.error.code === 'InvalidSymbol') {
+-              // Try next endpoint if public endpoint rejected symbol
+-              this.publicEndpointIndex = (this.publicEndpointIndex + 1) % this.publicEndpoints.length;
+-            }
++          const error = data.error || raw?.errors?.[0];
++          if (error) {
++            console.warn('[DerivWS Public] API message error:', error);
+             this.notifyHandlers({
+               msg_type: 'deriv_error',
+-              error: data.error.message || 'Deriv API error',
+-              code: data.error.code,
++              error: error.message || 'Deriv market-data error',
++              code: error.code,
+               orig_msg_type: data.msg_type,
+             });
+             return;
+           }
+ 
+           this.notifyHandlers(data);
+-        } catch (e) {
+-          console.error('[DerivWS] Error parsing message:', e);
++        } catch (error) {
++          console.error('[DerivWS] Error parsing public message:', error);
+         }
+       };
+ 
+-      this.ws.onerror = (error) => {
+-        console.warn('[DerivWS] WebSocket error:', error);
++      publicWs.onerror = (error) => {
++        if (this.ws !== publicWs) return;
++        console.warn('[DerivWS] Public WebSocket error:', error);
+       };
+ 
+-      this.ws.onclose = () => {
++      publicWs.onclose = () => {
++        if (this.ws !== publicWs) return;
++        this.ws = null;
+         this.isConnected = false;
+         this.stopHeartbeat();
+         this.notifyHandlers({ msg_type: 'connection_status', connected: false });
+-
+-        // Cycle to next public cluster
+         this.publicEndpointIndex = (this.publicEndpointIndex + 1) % this.publicEndpoints.length;
+ 
+         if (!this.reconnectTimeout) {
+@@ -316,118 +285,275 @@ class DerivWebSocketService {
+           }, 2000);
+         }
+       };
+-    } catch (err) {
+-      console.error('[DerivWS] Failed to initiate connection:', err);
++    } catch (error) {
++      console.error('[DerivWS] Failed to initiate public connection:', error);
+     }
+   }
+ 
+-  /**
+-   * Dedicated Authenticated Trading WebSocket for real orders, balances, and official settlement
+-   */
+-  private openAccountSocket(token: string): void {
++  private normalizeAccounts(payload: any): OptionsAccount[] {
++    const data = payload?.data ?? payload;
++    const candidate = Array.isArray(data)
++      ? data
++      : Array.isArray(data?.accounts)
++      ? data.accounts
++      : data?.account_id
++      ? [data]
++      : [];
++
++    return candidate
++      .map((account: any) => ({
++        account_id: String(account.account_id ?? account.loginid ?? ''),
++        account_type: String(account.account_type ?? (account.is_virtual ? 'demo' : 'real')).toLowerCase(),
++        balance: account.balance,
++        currency: account.currency || 'USD',
++        status: account.status,
++      }))
++      .filter((account: OptionsAccount) => Boolean(account.account_id));
++  }
++
++  private pickAccount(accounts: OptionsAccount[], mode: AccountMode, accountId?: string): OptionsAccount | undefined {
++    const targetType = mode === 'DEMO' ? 'demo' : 'real';
++    if (accountId) {
++      const exact = accounts.find(
++        (account) => account.account_id === accountId && account.account_type === targetType,
++      );
++      if (exact) return exact;
++    }
++    return accounts.find((account) => account.account_type === targetType);
++  }
++
++  private async directDerivSession(
++    token: string,
++    appId: string,
++    mode: AccountMode,
++    accountId?: string,
++  ): Promise<SessionResponse> {
++    const headers: Record<string, string> = {
++      Authorization: `Bearer ${token}`,
++      Accept: 'application/json',
++    };
++    if (appId) headers['Deriv-App-ID'] = appId;
++
++    const accountsResponse = await fetch('https://api.derivws.com/trading/v1/options/accounts', {
++      method: 'GET',
++      headers,
++    });
++    const accountsPayload = await accountsResponse.json().catch(() => ({}));
++    if (!accountsResponse.ok) {
++      const error = accountsPayload?.errors?.[0];
++      return {
++        ok: false,
++        code: error?.code || `HTTP_${accountsResponse.status}`,
++        error: error?.message || 'Unable to read Deriv Options accounts.',
++      };
++    }
++
++    const accounts = this.normalizeAccounts(accountsPayload);
++    const account = this.pickAccount(accounts, mode, accountId);
++    if (!account) return { ok: false, code: 'NO_OPTIONS_ACCOUNT', error: 'No Deriv Options account was found.' };
++
++    const otpResponse = await fetch(
++      `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(account.account_id)}/otp`,
++      { method: 'POST', headers },
++    );
++    const otpPayload = await otpResponse.json().catch(() => ({}));
++    if (!otpResponse.ok) {
++      const error = otpPayload?.errors?.[0];
++      retu
