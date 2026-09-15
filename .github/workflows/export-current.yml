@@ -11,9 +11,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Pack current source
         run: |
-          tar --exclude=.git --exclude=.restore --exclude=.github/workflows/export-current.yml -czf ../current-source.tar.gz .
+          tar --exclude=.git --exclude=.restore --exclude=.github/workflows/export-current.yml -czf /tmp/current-source.tar.gz .
+          cp /tmp/current-source.tar.gz current-source.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: current-source
-          path: ../current-source.tar.gz
+          path: current-source.tar.gz
           retention-days: 1
