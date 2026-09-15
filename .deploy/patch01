@@ -1,0 +1,384 @@
+in
+-      if (won) {
+-        if (accountMode === 'REAL') {
+-          setRealBalance((prev) => {
+-            const updated = Number((prev + trade.stake + trade.profit).toFixed(2));
+-            try {
+-              localStorage.setItem('deriv_real_balance', updated.toString());
+-            } catch {}
+-            return updated;
+-          });
+-          setAccountInfo((prev) => ({
+-            ...prev,
+-            balance: Number(((prev.balance || 0) + trade.stake + trade.profit).toFixed(2)),
+-          }));
+-        } else {
+-          setDemoBalance((prev) => {
+-            const updated = Number((prev + trade.stake + trade.profit).toFixed(2));
+-            try {
+-              localStorage.setItem('deriv_demo_balance', updated.toString());
+-            } catch {}
+-            return updated;
+-          });
+-        }
++      // Never manufacture balance changes for an authenticated Deriv contract.
++      // Deriv's balance subscription is the source of truth. Local crediting is only
++      // for the unauthenticated browser practice demo.
++      if (won && !trade.isRealDerivOrder) {
++        setDemoBalance((prev) => {
++          const updated = Number((prev + trade.stake + trade.profit).toFixed(2));
++          try {
++            localStorage.setItem('deriv_demo_balance', updated.toString());
++          } catch {}
++          return updated;
++        });
+       }
+ 
+       const toastId = `${Date.now()}_${performance.now().toString(36).replace('.', '')}`;
+@@ -1048,13 +1036,11 @@ export default function App() {
+       if (data.msg_type === 'connection_status') {
+         setConnected(data.connected);
+         if (data.connected) {
+-          // Auto-authorize saved Deriv token seamlessly on connect
+-          try {
+-            const savedToken = localStorage.getItem('deriv_api_token');
+-            if (savedToken && !derivService.getAccountInfo().isAuthorized) {
+-              derivService.authorize(savedToken);
+-            }
+-          } catch {}
++          // Restore only the current authenticated Deriv account session.
++          // PATs are tab-scoped and OAuth tokens stay server-side in HttpOnly cookies.
++          if (!derivService.getAccountInfo().isAuthorized) {
++            void derivService.restoreAccountSession(accountMode, true);
++          }
+ 
+           // Re-subscribe to current symbol
+           derivService.requestTickHistory(currentSymbol, scanDepth);
+@@ -1079,14 +1065,21 @@ export default function App() {
+       // Account Update (Authorization / Balance)
+       if (data.msg_type === 'account_update' && data.account) {
+         setAccountInfo(data.account);
+-        if (data.account.isAuthorized && !data.account.isVirtual) {
+-          setAccountMode('REAL');
++        if (data.account.isAuthorized) {
++          setAccountMode(data.account.isVirtual ? 'DEMO' : 'REAL');
+         }
+         if (typeof data.account.balance === 'number' && data.account.balance >= 0) {
+-          setRealBalance(data.account.balance);
+-          try {
+-            localStorage.setItem('deriv_real_balance', data.account.balance.toString());
+-          } catch {}
++          if (data.account.isVirtual) {
++            setDemoBalance(data.account.balance);
++            try {
++              localStorage.setItem('deriv_demo_balance', data.account.balance.toString());
++            } catch {}
++          } else {
++            setRealBalance(data.account.balance);
++            try {
++              localStorage.setItem('deriv_real_balance', data.account.balance.toString());
++            } catch {}
++          }
+         }
+       }
+ 
+@@ -1494,9 +1487,18 @@ export default function App() {
+         accountMode={accountMode}
+         onToggleAccountMode={(mode) => {
+           setAccountMode(mode);
++          derivService.setPreferredMode(mode);
+           try {
+             localStorage.setItem('deriv_account_mode', mode);
+           } catch {}
++
++          const currentAccount = derivService.getAccountInfo();
++          const connectedMode: AccountMode | null = currentAccount.isAuthorized
++            ? (currentAccount.isVirtual ? 'DEMO' : 'REAL')
++            : null;
++          if (connectedMode && connectedMode !== mode) {
++            void derivService.restoreAccountSession(mode, false);
++          }
+         }}
+         demoBalance={demoBalance}
+         realBalance={realBalance}
+@@ -2108,9 +2110,18 @@ export default function App() {
+         accountMode={accountMode}
+         onToggleAccountMode={(mode) => {
+           setAccountMode(mode);
++          derivService.setPreferredMode(mode);
+           try {
+             localStorage.setItem('deriv_account_mode', mode);
+           } catch {}
++
++          const currentAccount = derivService.getAccountInfo();
++          const connectedMode: AccountMode | null = currentAccount.isAuthorized
++            ? (currentAccount.isVirtual ? 'DEMO' : 'REAL')
++            : null;
++          if (connectedMode && connectedMode !== mode) {
++            void derivService.restoreAccountSession(mode, false);
++          }
+         }}
+         demoBalance={demoBalance}
+         onUpdateDemoBalance={(newBal) => {
+@@ -2132,9 +2143,18 @@ export default function App() {
+         onWithdrawSuccess={handleWithdrawSuccess}
+         onToggleAccountMode={(mode) => {
+           setAccountMode(mode);
++          derivService.setPreferredMode(mode);
+           try {
+             localStorage.setItem('deriv_account_mode', mode);
+           } catch {}
++
++          const currentAccount = derivService.getAccountInfo();
++          const connectedMode: AccountMode | null = currentAccount.isAuthorized
++            ? (currentAccount.isVirtual ? 'DEMO' : 'REAL')
++            : null;
++          if (connectedMode && connectedMode !== mode) {
++            void derivService.restoreAccountSession(mode, false);
++          }
+         }}
+       />
+ 
+diff --git a/a/src/components/DerivAccountModal.tsx b/b/src/components/DerivAccountModal.tsx
+index 85edbb8..a6eb464 100644
+--- a/a/src/components/DerivAccountModal.tsx
++++ b/b/src/components/DerivAccountModal.tsx
+@@ -48,7 +48,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
+ }) => {
+   const [tokenInput, setTokenInput] = useState<string>(() => {
+     try {
+-      return localStorage.getItem('deriv_api_token') || '';
++      return sessionStorage.getItem('deriv_api_token') || '';
+     } catch {
+       return '';
+     }
+@@ -56,12 +56,13 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
+ 
+   const [savedToken, setSavedToken] = useState<string>(() => {
+     try {
+-      return localStorage.getItem('deriv_api_token') || '';
++      return sessionStorage.getItem('deriv_api_token') || '';
+     } catch {
+       return '';
+     }
+   });
+ 
++  const [appIdInput, setAppIdInput] = useState<string>(() => derivService.getAppId());
+   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+   const [authError, setAuthError] = useState<string | null>(null);
+@@ -72,7 +73,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
+ 
+     // Check if token in storage updated
+     try {
+-      const current = localStorage.getItem('deriv_api_token');
++      const current = sessionStorage.getItem('deriv_api_token');
+       if (current) setSavedToken(current);
+     } catch {}
+ 
+@@ -87,11 +88,10 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
+ 
+       if (data.msg_type === 'account_update' && data.account?.isAuthorized) {
+         setIsSubmitting(false);
+-        setStatusMessage('✅ Connected to 100% Real Deriv Account!');
++        const connectedMode = data.account.isVirtual ? 'DEMO' : 'REAL';
++        setStatusMessage(`✅ Connected to Deriv ${connectedMode} account.`);
+         setAuthError(null);
+-        if (!data.account.isVirtual) {
+-          onToggleAccountMode('REAL');
+-        }
++        onToggleAccountMode(connectedMode);
+       }
+     });
+ 
+@@ -111,19 +111,20 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
+     }
+ 
+     setAuthError(null);
+-    setStatusMessage('Connecting to Deriv Real Trading Gateway...');
++    setStatusMessage(`Connecting to Deriv ${accountMode} trading gateway...`);
+     setIsSubmitting(true);
+ 
+     try {
+-      derivService.authorize(cleanToken);
++      derivService.authorize(cleanToken, appIdInput, accountMode);
+       try {
+-        localStorage.setItem('deriv_api_token', cleanToken);
++        sessionStorage.setItem('deriv_api_token', cleanToken);
++        if (appIdInput.trim()) localStorage.setItem('deriv_app_id', appIdInput.trim());
+         setSavedToken(cleanToken);
+       } catch {}
+ 
+       setTimeout(() => {
+         setIsSubmitting(false);
+-      }, 4000);
++      }, 12000);
+     } catch (err: any) {
+       setAuthError(err.message || 'Failed to connect to Deriv trading server.');
+       setIsSubmitting(false);
+@@ -157,7 +158,8 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
+   const handleConnectDerivOAuth = () => {
+     setAuthError(null);
+     setStatusMessage('Opening official Deriv login...');
+-    const oauthUrl = derivService.getOAuthRedirectUrl('1089');
++    derivService.setPreferredMode(accountMode);
++    const oauthUrl = derivService.getOAuthRedirectUrl();
+ 
+     const width = 560;
+     const height = 720;
+@@ -396,14 +398,24 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
+                       type="password"
+                       value={tokenInput}
+                       onChange={(e) => setTokenInput(e.target.value)}
+-                      placeholder="Paste your Deriv token here..."
++                      placeholder="Paste your Deriv Personal Access Token..."
++                      className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
++                    />
++                  </div>
++
++                  <div className="relative">
++                    <input
++                      type="text"
++                      value={appIdInput}
++                      onChange={(e) => setAppIdInput(e.target.value.trim())}
++                      placeholder="Your Deriv App ID (required for PAT)"
+                       className="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-xs font-mono text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                     />
+                   </div>
+ 
+                   <button
+                     type="submit"
+-                    disabled={isSubmitting || !tokenInput.trim()}
++                    disabled={isSubmitting || !tokenInput.trim() || !appIdInput.trim()}
+                     className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-emerald-400 hover:text-emerald-300 font-black text-xs font-mono transition flex items-center justify-center gap-2 cursor-pointer border border-emerald-500/30"
+                   >
+                     {isSubmitting ? (
+@@ -422,9 +434,9 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
+ 
+                 <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 text-[10px] font-mono text-slate-400 space-y-0.5">
+                   <span className="text-emerald-400 font-bold">10-Second Guide:</span> On Deriv.com, go to{' '}
+-                  <strong className="text-white">Settings &gt; API Token</strong>, check both{' '}
+-                  <strong className="text-emerald-300">[Read]</strong> and{' '}
+-                  <strong className="text-emerald-300">[Trade]</strong>, click Create, then paste here.
++                  <strong className="text-white">API Token</strong>, create a Personal Access Token with{' '}
++                  <strong className="text-emerald-300">Trade</strong> permission, then paste the token and your registered{' '}
++                  <strong className="text-emerald-300">Deriv App ID</strong> here. The token is kept only for this browser tab.
+                 </div>
+               </div>
+ 
+diff --git a/a/src/services/derivWs.ts b/b/src/services/derivWs.ts
+index 7d157f5..bf5797d 100644
+--- a/a/src/services/derivWs.ts
++++ b/b/src/services/derivWs.ts
+@@ -3,9 +3,32 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
+-import { ActiveSymbol, TickData, DerivAccountInfo } from '../types';
++import { DerivAccountInfo } from '../types';
+ 
+ type MessageHandler = (data: any) => void;
++type AccountMode = 'DEMO' | 'REAL';
++
++type OptionsAccount = {
++  account_id: string;
++  account_type: 'demo' | 'real' | string;
++  balance?: number | string;
++  currency?: string;
++  status?: string;
++};
++
++type SessionResponse = {
++  ok: boolean;
++  account?: OptionsAccount;
++  accounts?: OptionsAccount[];
++  ws_url?: string;
++  error?: string;
++  code?: string;
++};
++
++type PendingAutoBuy = {
++  amount: number;
++  passthrough: any;
++};
+ 
+ export const POPULAR_DERIV_SYMBOLS = [
+   '1HZ10V',
+@@ -25,45 +48,45 @@ export const POPULAR_DERIV_SYMBOLS = [
+ ];
+ 
+ class DerivWebSocketService {
+-  // Public market data socket (Deriv public options streaming feed)
++  // Public market data is always a real Deriv public feed and never needs account auth.
+   private ws: WebSocket | null = null;
+-  // Private authenticated trading socket
++  // Private account socket is opened only from Deriv's current OTP-authenticated URL.
+   private accountWs: WebSocket | null = null;
+ 
+-  private appId: string = '1089';
++  private appId: string = '';
+   private apiToken: string = '';
+-
+-  // Primary: Official Deriv Options Public WS (handles all 1s & standard synthetics with zero auth)
+-  // Fallbacks: BinaryWS, DerivWS
++  private preferredMode: AccountMode = 'REAL';
++  private selectedAccountId: string = '';
++  private intentionalAccountClose = false;
++  private accountReconnectTimer: ReturnType<typeof setTimeout> | null = null;
++  private accountReconnectAttempts = 0;
++  private requestId = 1000;
++  private pendingAutoBuys = new Map<number, PendingAutoBuy>();
++
++  // Primary current Options public WS, with legacy public feeds only as market-data fallbacks.
+   private publicEndpoints: string[] = [
+     'wss://api.derivws.com/trading/v1/options/ws/public',
+     'wss://ws.binaryws.com/websockets/v3',
+     'wss://ws.derivws.com/websockets/v3',
+   ];
+-  private publicEndpointIndex: number = 0;
+-
+-  private accountEndpoints: string[] = [
+-    'wss://ws.derivws.com/websockets/v3',
+-    'wss://ws.binaryws.com/websockets/v3',
+-  ];
+-  private accountEndpointIndex: number = 0;
++  private publicEndpointIndex = 0;
+ 
+-  private pingInterval: any = null;
+-  private reconnectTimeout: any = null;
+-  private messageHandlers: Set<MessageHandler> = new Set();
+-  private isConnected: boolean = false;
+-  private latency: number = 0;
+-  private lastPingTime: number = 0;
++  private pingInterval: ReturnType<typeof setInterval> | null = null;
++  private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
++  private messageHandlers = new Set<MessageHandler>();
++  private isConnected = false;
++  private latency = 0;
++  private lastPingTime = 0;
+ 
+-  private subscribedSymbols: Set<string> = new Set(POPULAR_DERIV_SYMBOLS);
+-  private activeContractSubscriptions: Set<string> = new Set();
++  private subscribedSymbols = new Set<string>(POPULAR_DERIV_SYMBOLS);
++  private activeContractSubscriptions = new Set<string>();
+ 
+   private accountInfo: DerivAccountInfo = {
+     isAuthorized: false,
+-    appId: '1089',
++    appId: '',
+   };
+ 
+-  private symbolPipSizes: Map<string, number> = new Map([
++  private symbolPipSizes = new Map<string, number>([
+     ['R_10', 3],
+     ['R_25', 3],
+     ['R_50', 4],
+@@ -80,233 +103,179 @@ class DerivWebSocketService {
+     ['JD50', 2],
+   ]);
+ 
+-  private symbolCurrentPrices: Map<string, number> = new Map();
++  private symbolCurrentPrices = new Map<string, number>();
+ 
+   constructor() {
+-    this.parse
