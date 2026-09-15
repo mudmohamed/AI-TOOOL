@@ -1,0 +1,32 @@
+name: Inspect Restore Payload
+on:
+  push:
+    branches: [inspect-payload-20260915]
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect payload
+        run: |
+          set -euxo pipefail
+          ls -lh .restore/mystery.gz
+          file .restore/mystery.gz
+          gzip -l .restore/mystery.gz || true
+          mkdir -p /tmp/mystery
+          if tar tzf .restore/mystery.gz >/tmp/list.txt 2>/tmp/tarerr.txt; then
+            echo 'TAR_GZ=YES'
+            head -100 /tmp/list.txt
+          else
+            echo 'TAR_GZ=NO'
+            cat /tmp/tarerr.txt
+            if gzip -dc .restore/mystery.gz >/tmp/mystery.out 2>/tmp/gzerr.txt; then
+              echo 'GZIP_DECODE=YES'
+              file /tmp/mystery.out
+              wc -c /tmp/mystery.out
+              head -c 200 /tmp/mystery.out | xxd
+            else
+              echo 'GZIP_DECODE=NO'
+              cat /tmp/gzerr.txt
+            fi
+          fi
