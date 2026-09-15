@@ -1,0 +1,447 @@
+en' || data.error.code === 'AuthorizationRequired') {
+-              this.accountInfo = {
+-                isAuthorized: false,
+-                appId: this.appId,
+-              };
+-              this.notifyHandlers({
+-                msg_type: 'auth_error',
+-                error: data.error.message || 'Authorization failed. Please check your Deriv API token (Read & Trade required).',
+-                code: data.error.code,
+-              });
+-              return;
+-            }
+-
+-            this.notifyHandlers({
+-              msg_type: 'account_error',
+-              error: data.error.message || 'Deriv account error',
+-              code: data.error.code,
+-            });
+-            return;
+-          }
+-
+           this.notifyHandlers(data);
+-        } catch (err) {
+-          console.error('[DerivWS Account] Error parsing message:', err);
++        } catch (error) {
++          console.error('[DerivWS Account] Error parsing message:', error);
+         }
+       };
+ 
+-      aws.onerror = (err) => {
+-        clearTimeout(connectionTimer);
+-        console.warn('[DerivWS Account] Socket error:', err);
+-        this.accountEndpointIndex = (this.accountEndpointIndex + 1) % this.accountEndpoints.length;
+-        this.notifyHandlers({
+-          msg_type: 'auth_error',
+-          error: 'Connection to Deriv trading server failed. Switching to backup server...',
+-        });
++      accountWs.onerror = (error) => {
++        if (this.accountWs !== accountWs) return;
++        console.warn('[DerivWS Account] WebSocket error:', error);
++        this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
+       };
+ 
+-      aws.onclose = () => {
++      accountWs.onclose = () => {
+         clearTimeout(connectionTimer);
+-        if (this.accountWs === aws) {
+-          this.accountWs = null;
++        if (this.accountWs !== accountWs) return;
++        this.accountWs = null;
++        this.pendingAutoBuys.clear();
++        this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
++
++        if (!this.intentionalAccountClose && this.accountInfo.isAuthorized && this.accountReconnectAttempts < 5) {
++          this.accountReconnectAttempts += 1;
++          const delay = Math.min(10000, 1500 * this.accountReconnectAttempts);
++          if (this.accountReconnectTimer) clearTimeout(this.accountReconnectTimer);
++          this.accountReconnectTimer = setTimeout(() => {
++            this.accountReconnectTimer = null;
++            void this.restoreAccountSession(mode, true, this.selectedAccountId || undefined);
++          }, delay);
+         }
+       };
+-    } catch (err) {
+-      console.error('[DerivWS] Failed to connect account socket:', err);
++    } catch (error) {
++      console.error('[DerivWS Account] Failed to open authenticated socket:', error);
++      this.notifyHandlers({ msg_type: 'auth_error', error: 'Unable to open the authenticated Deriv trading socket.' });
+     }
+   }
+ 
+-  public switchAccount(loginId: string): void {
++  /**
++   * Connect a Personal Access Token through the current REST -> OTP -> authenticated WS workflow.
++   * Token remains only in this browser tab (sessionStorage), never long-lived localStorage.
++   */
++  public authorize(token: string, appId?: string, mode: AccountMode = 'REAL'): void {
++    const cleanToken = String(token || '').trim();
++    if (!cleanToken) {
++      this.notifyHandlers({ msg_type: 'auth_error', error: 'Please paste your Deriv Personal Access Token.' });
++      return;
++    }
++
++    if (appId !== undefined) this.setAppId(appId);
++    this.apiToken = cleanToken;
++    this.setPreferredMode(mode);
++
+     try {
+-      const savedAccountsStr = localStorage.getItem('deriv_accounts_list');
+-      if (savedAccountsStr) {
+-        const list = JSON.parse(savedAccountsStr);
+-        const target = list.find((a: any) => a.loginid === loginId);
+-        if (target && target.token) {
+-          this.authorize(target.token);
+-          return;
+-        }
+-      }
++      sessionStorage.setItem('deriv_api_token', cleanToken);
+     } catch {}
+-    // If token not mapped per subaccount, send switch_account or re-authorize
+-    this.sendAccount({ switch_account: loginId });
++
++    void this.restoreAccountSession(mode, false);
+   }
+ 
+-  public authorize(token: string): void {
+-    this.apiToken = token.trim();
+-    try {
+-      localStorage.setItem('deriv_api_token', this.apiToken);
+-    } catch {}
+-    this.openAccountSocket(this.apiToken);
++  public async restoreAccountSession(
++    mode: AccountMode = this.preferredMode,
++    silent = false,
++    accountId?: string,
++  ): Promise<boolean> {
++    this.setPreferredMode(mode);
++
++    // Reuse a remembered account only when it belongs to the requested mode.
++    // This prevents a previous REAL account id from pinning a DEMO request (and vice versa).
++    const currentMode: AccountMode | null = this.accountInfo.isAuthorized
++      ? (this.accountInfo.isVirtual ? 'DEMO' : 'REAL')
++      : null;
++    const rememberedAccount = accountId || (currentMode === mode ? this.selectedAccountId : '');
++
++    const session = await this.requestSession(mode, rememberedAccount || undefined, silent);
++    if (this.applySession(session, mode)) return true;
++
++    if (!silent && session.error) {
++      this.notifyHandlers({
++        msg_type: 'auth_error',
++        error: session.error,
++        code: session.code,
++      });
++    }
++    return false;
++  }
++
++  public switchAccount(loginId: string): void {
++    const target = this.accountInfo.accountsList?.find((account) => account.loginid === loginId);
++    const mode: AccountMode = target?.is_virtual ? 'DEMO' : 'REAL';
++    this.selectedAccountId = loginId;
++    this.setPreferredMode(mode);
++    try { sessionStorage.setItem('deriv_account_id', loginId); } catch {}
++    void this.restoreAccountSession(mode, false, loginId);
+   }
+ 
+   public logout(): void {
+-    this.apiToken = '';
+-    this.accountInfo = {
+-      isAuthorized: false,
+-      appId: this.appId,
+-    };
+-    try {
+-      localStorage.removeItem('deriv_api_token');
+-    } catch {}
++    this.intentionalAccountClose = true;
++    if (this.accountReconnectTimer) {
++      clearTimeout(this.accountReconnectTimer);
++      this.accountReconnectTimer = null;
++    }
+     if (this.accountWs) {
+-      try {
+-        this.accountWs.close();
+-      } catch {}
++      try { this.accountWs.close(); } catch {}
+       this.accountWs = null;
+     }
++    this.intentionalAccountClose = false;
++
++    this.apiToken = '';
++    this.selectedAccountId = '';
++    this.pendingAutoBuys.clear();
++    this.activeContractSubscriptions.clear();
++    this.accountInfo = { isAuthorized: false, appId: this.appId };
++
++    try {
++      sessionStorage.removeItem('deriv_api_token');
++      sessionStorage.removeItem('deriv_account_id');
++    } catch {}
++
++    // Also clear an OAuth HttpOnly session if this deployment uses OAuth.
++    void fetch('/api/deriv/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => undefined);
++    this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
+     this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+   }
+ 
+   public reconnect(newAppId?: string, newToken?: string): void {
+-    if (newAppId) {
+-      this.appId = newAppId.trim();
+-      try {
+-        localStorage.setItem('deriv_app_id', this.appId);
+-      } catch {}
+-    }
++    if (newAppId !== undefined) this.setAppId(newAppId);
+     if (newToken !== undefined) {
+       this.apiToken = newToken.trim();
+       try {
+-        if (this.apiToken) {
+-          localStorage.setItem('deriv_api_token', this.apiToken);
+-        } else {
+-          localStorage.removeItem('deriv_api_token');
+-        }
++        if (this.apiToken) sessionStorage.setItem('deriv_api_token', this.apiToken);
++        else sessionStorage.removeItem('deriv_api_token');
+       } catch {}
+     }
+ 
+     if (this.ws) {
+-      try {
+-        this.ws.close();
+-      } catch {}
++      try { this.ws.close(); } catch {}
+       this.ws = null;
+     }
+     this.isConnected = false;
+     this.stopHeartbeat();
+     this.connect();
+-
+-    if (this.apiToken) {
+-      this.openAccountSocket(this.apiToken);
+-    }
++    void this.restoreAccountSession(this.preferredMode, true);
+   }
+ 
+   public getAccountInfo(): DerivAccountInfo {
+@@ -643,44 +775,35 @@ class DerivWebSocketService {
+ 
+   public extractLastDigit(quote: number, symbol: string): number {
+     const pip = this.getPipSize(symbol);
+-    const quoteStr = quote.toFixed(pip);
+-    const lastChar = quoteStr.charAt(quoteStr.length - 1);
+-    const digit = parseInt(lastChar, 10);
+-    return isNaN(digit) ? 0 : digit;
++    const quoteStr = Number(quote).toFixed(pip);
++    const digit = Number.parseInt(quoteStr.charAt(quoteStr.length - 1), 10);
++    return Number.isNaN(digit) ? 0 : digit;
+   }
+ 
+-  /**
+-   * Send command to Public Market socket
+-   */
+   public send(request: any): void {
+-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
++    if (this.ws?.readyState === WebSocket.OPEN) {
+       this.ws.send(JSON.stringify(request));
+-    } else {
+-      const checkAndSend = setInterval(() => {
+-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+-          this.ws.send(JSON.stringify(request));
+-          clearInterval(checkAndSend);
+-        }
+-      }, 200);
+-      setTimeout(() => clearInterval(checkAndSend), 6000);
++      return;
+     }
++
++    const checkAndSend = setInterval(() => {
++      if (this.ws?.readyState === WebSocket.OPEN) {
++        this.ws.send(JSON.stringify(request));
++        clearInterval(checkAndSend);
++      }
++    }, 200);
++    setTimeout(() => clearInterval(checkAndSend), 6000);
+   }
+ 
+-  /**
+-   * Send command to Private Account socket
+-   */
+-  public sendAccount(request: any): void {
+-    if (this.accountWs && this.accountWs.readyState === WebSocket.OPEN) {
++  /** Auth-required commands NEVER fall back to the public socket. */
++  public sendAccount(request: any): boolean {
++    if (this.accountWs?.readyState === WebSocket.OPEN && this.accountInfo.isAuthorized) {
+       this.accountWs.send(JSON.stringify(request));
+-    } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+-      // Fallback to main socket if accountWs not active
+-      this.ws.send(JSON.stringify(request));
++      return true;
+     }
++    return false;
+   }
+ 
+-  /**
+-   * Request a real contract Proposal from Deriv to verify payout rate, barrier, and pricing.
+-   */
+   public requestProposal(params: {
+     contract_type: string;
+     symbol: string;
+@@ -698,21 +821,18 @@ class DerivWebSocketService {
+       currency: this.accountInfo.currency || 'USD',
+       duration: params.duration || 1,
+       duration_unit: params.duration_unit || 't',
+-      symbol: params.symbol,
++      underlying_symbol: params.symbol,
++      req_id: this.nextRequestId(),
+     };
+ 
+-    if (params.barrier !== undefined) {
+-      proposalReq.barrier = String(params.barrier);
+-    }
+-    if (params.passthrough) {
+-      proposalReq.passthrough = params.passthrough;
+-    }
+-
++    if (params.barrier !== undefined) proposalReq.barrier = String(params.barrier);
++    if (params.passthrough) proposalReq.passthrough = params.passthrough;
+     this.sendAccount(proposalReq);
+   }
+ 
+   /**
+-   * Purchases a contract directly via Deriv WebSocket
++   * Real order path: proposal -> real ask price -> buy -> contract id -> proposal_open_contract settlement.
++   * No local/random result is used for REAL orders.
+    */
+   public buyContract(params: {
+     contract_type: string;
+@@ -726,11 +846,23 @@ class DerivWebSocketService {
+     trade_id?: string;
+     passthrough?: any;
+   }): void {
+-    if (!this.accountInfo.isAuthorized) {
++    if (!this.accountInfo.isAuthorized || this.accountWs?.readyState !== WebSocket.OPEN) {
++      this.notifyHandlers({
++        msg_type: 'buy_error',
++        error: 'Deriv trading account is not connected. Connect DEMO or REAL before sending an order.',
++        code: 'AuthorizationRequired',
++        passthrough: { ...(params.passthrough || {}), trade_id: params.trade_id },
++      });
++      return;
++    }
++
++    const amount = Number(params.amount);
++    if (!Number.isFinite(amount) || amount <= 0) {
+       this.notifyHandlers({
+-        msg_type: 'deriv_error',
+-        error: 'Account not authorized. Connect your Deriv API token or log in with Deriv OAuth to place live orders.',
+-        code: 'Unauthorised',
++        msg_type: 'buy_error',
++        error: 'Stake must be greater than zero.',
++        code: 'InvalidStake',
++        passthrough: { ...(params.passthrough || {}), trade_id: params.trade_id },
+       });
+       return;
+     }
+@@ -746,37 +878,39 @@ class DerivWebSocketService {
+     if (params.proposal_id) {
+       this.sendAccount({
+         buy: params.proposal_id,
+-        price: params.price ?? params.amount,
++        price: params.price ?? amount,
+         passthrough,
++        req_id: this.nextRequestId(),
+       });
+       return;
+     }
+ 
+-    const buyRequest: any = {
+-      buy: 1,
+-      price: params.amount,
+-      parameters: {
+-        amount: params.amount,
+-        basis: 'stake',
+-        contract_type: params.contract_type,
+-        currency: this.accountInfo.currency || 'USD',
+-        duration: params.duration || 1,
+-        duration_unit: params.duration_unit || 't',
+-        symbol: params.symbol,
+-      },
+-      passthrough,
++    const reqId = this.nextRequestId();
++    const proposalRequest: any = {
++      proposal: 1,
++      amount,
++      basis: 'stake',
++      contract_type: params.contract_type,
++      currency: this.accountInfo.currency || 'USD',
++      duration: params.duration || 1,
++      duration_unit: params.duration_unit || 't',
++      underlying_symbol: params.symbol,
++      req_id: reqId,
+     };
++    if (params.barrier !== undefined) proposalRequest.barrier = String(params.barrier);
+ 
+-    if (params.barrier !== undefined) {
+-      buyRequest.parameters.barrier = String(params.barrier);
++    this.pendingAutoBuys.set(reqId, { amount, passthrough });
++    if (!this.sendAccount(proposalRequest)) {
++      this.pendingAutoBuys.delete(reqId);
++      this.notifyHandlers({
++        msg_type: 'buy_error',
++        error: 'Authenticated Deriv trading socket is not ready.',
++        code: 'SocketNotReady',
++        passthrough,
++      });
+     }
+-
+-    this.sendAccount(buyRequest);
+   }
+ 
+-  /**
+-   * Subscribes to real-time ticks for an active symbol WITHOUT dropping other market streams.
+-   */
+   public subscribeTicks(symbol: string): void {
+     this.subscribedSymbols.add(symbol);
+     this.send({ ticks: symbol, subscribe: 1 });
+@@ -787,16 +921,13 @@ class DerivWebSocketService {
+   }
+ 
+   public subscribeMultipleTicks(symbols: string[]): void {
+-    symbols.forEach((sym) => {
+-      this.subscribedSymbols.add(sym);
+-      this.send({ ticks: sym, subscribe: 1 });
++    symbols.forEach((symbol) => {
++      this.subscribedSymbols.add(symbol);
++      this.send({ ticks: symbol, subscribe: 1 });
+     });
+   }
+ 
+-  /**
+-   * Requests real tick history from Deriv WebSocket server.
+-   */
+-  public requestTickHistory(symbol: string, count: number = 1000): void {
++  public requestTickHistory(symbol: string, count = 1000): void {
+     this.send({
+       ticks_history: symbol,
+       end: 'latest',
+@@ -807,38 +938,29 @@ class DerivWebSocketService {
+   }
+ 
+   public requestActiveSymbols(): void {
+-    this.send({
+-      active_symbols: 'brief',
+-    });
++    this.send({ active_symbols: 'brief' });
+   }
+ 
+   public addListener(handler: MessageHandler): () => void {
+     this.messageHandlers.add(handler);
+-
+-    // Provide immediate actual socket state to subscriber
+-    setTimeout(() => {
++    queueMicrotask(() => {
+       try {
+         handler({ msg_type: 'connection_status', connected: this.isConnected });
+         handler({ msg_type: 'latency_update', latency: this.latency });
+-        if (this.accountInfo.isAuthorized) {
