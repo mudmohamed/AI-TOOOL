@@ -1,0 +1,19 @@
+name: Export Current Matrix Source
+on:
+  push:
+    branches: [restore-exact-fixed-20260915-v2]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pack current source
+        run: |
+          tar --exclude=.git --exclude=.restore --exclude=.github/workflows/export-current.yml -czf current-source.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: current-source
+          path: current-source.tar.gz
+          retention-days: 1
