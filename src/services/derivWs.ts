@@ -489,7 +489,12 @@ class DerivWebSocketService {
 
           const buyReqId = this.nextPrivateReqId();
           this.buyRequests.set(buyReqId, meta);
-          this.sendAccount({ buy: proposal.id, price: askPrice, req_id: buyReqId });
+          if (askPrice > meta.amount + 0.000001) {
+            this.notifyHandlers({ msg_type: 'trade_error', clientTradeId: meta.clientTradeId, stage: 'proposal', error: `Deriv proposal price ${askPrice.toFixed(2)} exceeds selected stake ${meta.amount.toFixed(2)}. Order blocked.` });
+            this.proposalMeta.delete(meta.clientTradeId);
+            return;
+          }
+          this.sendAccount({ buy: proposal.id, price: meta.amount, req_id: buyReqId });
           return;
         }
 
@@ -732,51 +737,10 @@ class DerivWebSocketService {
       return false;
     }
 
-    let barrier = params.barrier !== undefined && params.barrier !== '' ? String(params.barrier) : undefined;
-    let managedMatches = false;
-    let recoveryStep = 0;
-
-    if (params.contract_type === 'DIGITMATCH') {
-      managedMatches = true;
-      const state = this.getRecoveryState(params.symbol);
-      const currentTick = this.liveTickCounts.get(params.symbol) || 0;
-
-      // The original real engine trades only every third real tick while idle.
-      if (currentTick - state.lastTradeTick < 3) return false;
-
-      if (state.halted) {
-        this.notifyHandlers({
-          msg_type: 'trade_error',
-          clientTradeId: params.clientTradeId,
-          stage: 'risk',
-          error: `Matches recovery stopped after ${state.maxSteps} consecutive losing steps. Switch account or reload to start a new bounded sequence.`,
-        });
-        return false;
-      }
-
-      if (state.recoveryStep === 0 || state.baseStake <= 0) {
-        state.baseStake = amount;
-      }
-
-      recoveryStep = state.recoveryStep;
-      amount = Number((state.baseStake * Math.pow(state.multiplier, recoveryStep)).toFixed(2));
-      amount = Math.max(0.35, amount);
-      barrier = String(this.markovDigit(params.symbol, params.barrier));
-
-      const balance = Number(this.accountInfo.balance ?? 0);
-      if (Number.isFinite(balance) && balance > 0 && amount > balance) {
-        state.halted = true;
-        this.notifyHandlers({
-          msg_type: 'trade_error',
-          clientTradeId: params.clientTradeId,
-          stage: 'risk',
-          error: `Recovery stake ${amount.toFixed(2)} exceeds the available Deriv balance. Matches engine stopped before sending the order.`,
-        });
-        return false;
-      }
-
-      state.lastTradeTick = currentTick;
-    }
+    // Preserve exactly what the original strategy selected.
+    const barrier = params.barrier !== undefined && params.barrier !== '' ? String(params.barrier) : undefined;
+    const managedMatches = false;
+    const recoveryStep = 0;
 
     const meta: TradeRequestMeta = {
       clientTradeId: params.clientTradeId,
