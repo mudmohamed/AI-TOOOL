@@ -1,0 +1,74 @@
+name: Restore Exact Supplied System
+on:
+  push:
+    branches: [restore-exact-final-20260916]
+permissions:
+  contents: write
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Rebuild exact supplied system and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .restore/exact.patch.xz.b64.part* > /tmp/restore.patch.xz.b64
+          base64 -d /tmp/restore.patch.xz.b64 > /tmp/restore.patch.xz
+          echo '9b59dbafc56c69f9fa375a4afcd5ddf00cb2602157e7e701c0f8bb834d4d5faa  /tmp/restore.patch.xz' | sha256sum -c -
+          xz -dc /tmp/restore.patch.xz > /tmp/restore.patch
+
+          git fetch origin main
+          git reset --hard origin/main
+          git clean -fdx
+          git apply --check /tmp/restore.patch
+          git apply --binary /tmp/restore.patch
+
+          cat >/tmp/expected.sha256 <<'EOF'
+          04600038779a31083a6c17b72e8b001d067d940e01afa8de7a681aabf93cbc87  .env.example
+          ee470c4de47b44c5fb09fd583573840b71fd44fb2b4b2a4029a822665b83122c  src/App.tsx
+          62afbc6ed0f6062170eb28f4ec962502d0f0da033154a866783789e560a1b1d8  src/main.tsx
+          13cf1eaf961eb9204ed32c25c893f23e5ab723f879ca6cb91529c209b95fd2af  src/components/DerivAccountModal.tsx
+          bc3c8ad9958236603af4a37d4aa3847221902eb1c6a11cbfbc77652832035bac  src/services/derivWs.ts
+          ad719b51d71a8950182e725521a44ad4f1da852b601c68a8de11ff17cb3e8256  api/deriv/logout.js
+          ab407df739db3e941481e3f9c29efb8c3e480587b1efeb6ada12532328dd7f09  api/deriv/oauth-callback.js
+          d928cc7da5498bd8f0c07026d886c83009e077b86d951fd1253295f32489be52  api/deriv/oauth-start.js
+          10641245cdf1dc1e644081b66a53113bc4987216658d88147162c9416fe887a7  api/deriv/session.js
+          60ed5aa43939ddcbc63be92d45cca692a32bfa63d2ab66b0f613e778bd07bf7d  src/utils/indicators.ts
+          715848847c2ec7b46d5a53f8eef6a39572ae367d74c4f1e15163e849c66a0367  src/utils/recoveryEngine.ts
+          1206056592edabbbcd5498825610398be8410ca0909fd577b17e304cdf35e991  src/utils/autoMatchesEngine.ts
+          5a3f8a4ff2381cbed66563f5f8d5678ad36979da0f1834e47e1309178da1782b  src/utils/backtestEngine.ts
+          630f02c8b880f2acfce066edb5fbdeee004a13aef718bc0935469f0e8bdb1ba0  src/components/StrongestMarketScanner.tsx
+          273c9de7e3765afe5d9c151bf328543a234359b69f04fc8f5c9f4c4c4602269b  src/components/DeepScanAutoMatches.tsx
+          2afdc36ae1a92d0478b7bc37df79bfac6ee5e21969b2fb6a94a11318f9f1ccdd  src/components/SuperRecoveryManager.tsx
+          16628a4593b6b4e3ba7463d413b9e530ee3fcc73e1fa28e43a37d2d2f7b27372  src/components/BulkMultiTrader.tsx
+          EOF
+          sed -i 's/^          //' /tmp/expected.sha256
+          sha256sum -c /tmp/expected.sha256
+
+          ! grep -F 'multiplier: 2.1' src/services/derivWs.ts
+          ! grep -F 'maxSteps: 5' src/services/derivWs.ts
+          ! grep -F 'every third tick' src/services/derivWs.ts
+          test ! -e src/services/derivConnectionFix.ts
+
+          node --check api/deriv/logout.js
+          node --check api/deriv/oauth-callback.js
+          node --check api/deriv/oauth-start.js
+          node --check api/deriv/session.js
+
+          npm install --no-audit --no-fund
+          npm run build
+          npm run lint
+
+          rm -rf .restore
+          rm -f .github/workflows/restore-exact-final.yml
+          git config user.name 'Restore Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git commit -m 'Restore exact supplied system; keep Deriv connection only'
+          git push --force-with-lease origin HEAD:restore-exact-final-20260916
