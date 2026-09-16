@@ -1,0 +1,49 @@
+name: Verify selected stake fix
+on:
+  push:
+    branches: [fix-exact-selected-stake-20260916]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Patch and verify
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/services/derivWs.ts')
+          s=p.read_text()
+          start=s.index("    let barrier = params.barrier")
+          end=s.index("\n    const meta: TradeRequestMeta", start)
+          replacement="""    // Preserve exactly what the original strategy selected.
+    const barrier = params.barrier !== undefined && params.barrier !== '' ? String(params.barrier) : undefined;
+    const managedMatches = false;
+    const recoveryStep = 0;
+"""
+          s=s[:start]+replacement+s[end:]
+          old="this.sendAccount({ buy: proposal.id, price: askPrice, req_id: buyReqId });"
+          new="""if (askPrice > meta.amount + 0.000001) {
+            this.notifyHandlers({ msg_type: 'trade_error', clientTradeId: meta.clientTradeId, stage: 'proposal', error: `Deriv proposal price ${askPrice.toFixed(2)} exceeds selected stake ${meta.amount.toFixed(2)}. Order blocked.` });
+            this.proposalMeta.delete(meta.clientTradeId);
+            return;
+          }
+          this.sendAccount({ buy: proposal.id, price: meta.amount, req_id: buyReqId });"""
+          if old not in s: raise SystemExit('buy block not found')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          npm install --no-audit --no-fund
+          npm run build
+          git config user.name 'Restore Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add src/services/derivWs.ts
+          git commit -m 'Preserve exact selected stake and target'
+          git push origin HEAD:fix-exact-selected-stake-20260916
