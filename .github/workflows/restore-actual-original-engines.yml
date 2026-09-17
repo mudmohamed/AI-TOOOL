@@ -23,14 +23,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # Guard the current live execution behavior before touching support/UI engines.
           grep -Fq "sameLossStake" src/App.tsx
           ! grep -Fq "calculateNextStake(" src/App.tsx
           ! grep -Fq "Configured loss limit reached. Auto-Matches stopped." src/App.tsx
 
           mkdir -p /tmp/original-engines
           cat .restore/verified00 .restore/verified01 .restore/verified02 .restore/verified03 .restore/verified04 .restore/verified05 .restore/verified06 .restore/verified07 .restore/verified08a .restore/verified08b | base64 -d > /tmp/original-engines.tar.gz
-          echo "7e81a361365797ab05373b9d244e445dd3536e17138142cd536236440780ac82  /tmp/original-engines.tar.gz" | sha256sum -c -
           tar -xzf /tmp/original-engines.tar.gz -C /tmp/original-engines
+
+          # Verify extracted files byte-for-byte against the untouched original ZIP.
+          echo "bfbdbf0b995e89043ab293bce1ef831a4f53496be51bddf41fcc0b6c377a9eea  /tmp/original-engines/src/components/DigitProfitabilityHeatmap.tsx" | sha256sum -c -
+          echo "2c9a71cf2ad9b39501be96fba0aa5f8094b2b48e5b215be65871b5cefa938717  /tmp/original-engines/src/components/RecoveryPerformanceChart.tsx" | sha256sum -c -
+          echo "af3b38306f3a585c836cfee26eafaa301cc68c56c456a3110721ad3531f87950  /tmp/original-engines/src/components/StrategyBacktesterTab.tsx" | sha256sum -c -
+          echo "5a3f8a4ff2381cbed66563f5f8d5678ad36979da0f1834e47e1309178da1782b  /tmp/original-engines/src/utils/backtestEngine.ts" | sha256sum -c -
+          echo "0a5e622a0b807eb7d0e131a8d51c1e5bd916c4272b78c0f1db2d9ba28b54caaf  /tmp/original-engines/src/utils/csvExport.ts" | sha256sum -c -
+
           cp -a /tmp/original-engines/src/components/DigitProfitabilityHeatmap.tsx src/components/
           cp -a /tmp/original-engines/src/components/RecoveryPerformanceChart.tsx src/components/
           cp -a /tmp/original-engines/src/components/StrategyBacktesterTab.tsx src/components/
@@ -39,6 +48,65 @@ jobs:
 
           python - <<'PY'
           from pathlib import Path
+
+          # Restore the original cold-digit DIFFERS engine without replacing the
+          # current Auto-Matches implementation.
+          p = Path('src/utils/autoMatchesEngine.ts')
+          s = p.read_text()
+          if 'export function findBestDiffersTarget(' not in s:
+              marker = 'export interface SameLosingPriceRecoveryResult {'
+              block = r'''/**
+ * Evaluates the coldest / least likely digit for high-win DIFFERS trades (90%+ theoretical win rate)
+ */
+export function findBestDiffersTarget(
+  digits: number[],
+  currentDigit: number
+): { targetDigit: number; winProbability: number; rationale: string } {
+  if (digits.length < 20) {
+    const fallback = (currentDigit + 5) % 10;
+    return {
+      targetDigit: fallback,
+      winProbability: 90.0,
+      rationale: `Targeting opposite digit ${fallback} for 90% theoretical DIFFERS win rate.`,
+    };
+  }
+
+  const markovMatrix = calculateMarkovTransitionMatrix(digits);
+  const nextProbabilities = markovMatrix[currentDigit] || Array(10).fill(0.1);
+  const recentSlice = digits.slice(-30);
+  const microCounts: number[] = Array(10).fill(0);
+  recentSlice.forEach((d) => {
+    if (d >= 0 && d <= 9) microCounts[d]++;
+  });
+
+  let lowestScore = 9999;
+  let coldestDigit = (currentDigit + 5) % 10;
+
+  for (let d = 0; d < 10; d++) {
+    const markovProbPct = (nextProbabilities[d] ?? 0.1) * 100;
+    const microFreqPct = (microCounts[d] / recentSlice.length) * 100;
+    const score = markovProbPct * 0.6 + microFreqPct * 0.4;
+    if (score < lowestScore) {
+      lowestScore = score;
+      coldestDigit = d;
+    }
+  }
+
+  const estimatedWinRate = Number((100 - Math.min(15, lowestScore)).toFixed(1));
+
+  return {
+    targetDigit: coldestDigit,
+    winProbability: Math.max(88, Math.min(96, estimatedWinRate)),
+    rationale: `Digit ${coldestDigit} has the lowest transition probability (${lowestScore.toFixed(1)}%). DIFFERS contract has ~${estimatedWinRate}% empirical win expectation.`,
+  };
+}
+
+'''
+              if marker not in s:
+                  raise SystemExit('Auto-Matches recovery interface anchor missing')
+              s = s.replace(marker, block + marker, 1)
+              p.write_text(s)
+
           p = Path('src/types.ts')
           s = p.read_text()
           if 'export interface SessionStats' not in s:
@@ -56,23 +124,17 @@ jobs:
               if idx < 0: raise SystemExit('AutoMatchesConfig anchor missing')
               e = s.find('\n', idx) + 1
               s = s[:e] + '  maxStakeCap?: number;\n  fixedStakeMode?: boolean;\n  maxAllowedLosses?: number;\n' + s[e:]
-          s = s.replace("nextTradeCondition?: 'RESET_ON_WIN';", "nextTradeCondition?: 'FIXED_STAKE' | 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';")
-          s = s.replace("targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM';", "targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS' | 'DIFFERS_SAFE_GROWTH';")
-          section = s[s.find('export interface AutoMatchesConfig'):s.find('export interface RiskConfig')]
+          section_start = s.find('export interface AutoMatchesConfig')
+          section_end = s.find('export interface DBotXmlDefinition', section_start)
+          section = s[section_start:section_end]
+          if "'FIXED_STAKE'" not in section:
+              s = s.replace("nextTradeCondition?: 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';", "nextTradeCondition?: 'FIXED_STAKE' | 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';", 1)
+          if "'COLD_DIFFERS'" not in section:
+              s = s.replace("targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM';", "targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS' | 'DIFFERS_SAFE_GROWTH';", 1)
           if 'contractMode?:' not in section:
               marker = '  customTargetDigit?: number;\n'
               s = s.replace(marker, marker + "  contractMode?: 'MATCHES' | 'DIFFERS' | 'OVER_UNDER' | 'EVEN_ODD';\n  onlyWhenSignalConfirmed?: boolean;\n  minConfidenceThreshold?: number;\n", 1)
           p.write_text(s)
-
-          p = Path('src/services/derivWs.ts')
-          s = p.read_text()
-          if 'export const POPULAR_DERIV_SYMBOLS' not in s:
-              marker = "from '../types';\n"
-              pos = s.find(marker)
-              if pos < 0: raise SystemExit('derivWs types import missing')
-              pos += len(marker)
-              s = s[:pos] + "\nexport const POPULAR_DERIV_SYMBOLS = ['1HZ10V','1HZ25V','1HZ50V','1HZ75V','1HZ100V','R_10','R_25','R_50','R_75','R_100','stpRNG','JD10','JD25','JD50'];\n" + s[pos:]
-              p.write_text(s)
 
           p = Path('src/App.tsx')
           s = p.read_text()
@@ -104,9 +166,12 @@ jobs:
           PY
 
           npm install recharts@^3.10.1 --save --no-audit --no-fund
+
+          # Guard again after restoration: do not alter current live execution behavior.
           grep -Fq "sameLossStake" src/App.tsx
           ! grep -Fq "calculateNextStake(" src/App.tsx
           ! grep -Fq "Configured loss limit reached. Auto-Matches stopped." src/App.tsx
+          grep -Fq "findBestDiffersTarget" src/utils/autoMatchesEngine.ts
           npm run lint
           npm run build
 
@@ -114,5 +179,5 @@ jobs:
           git config user.name 'Restore Bot'
           git config user.email 'actions@users.noreply.github.com'
           git add -A
-          git commit -m 'Restore actual original engines without changing winning execution'
+          git commit -m 'Restore original engines and full system without changing live execution'
           git push origin HEAD:main
