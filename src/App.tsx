@@ -17,7 +17,6 @@ import {
 } from './types';
 import { analyzeDigits, evaluateMarketStrength } from './utils/indicators';
 import { findBestAutoMatchesTarget } from './utils/autoMatchesEngine';
-import { calculateNextStake } from './utils/recoveryEngine';
 import { playLossSound, playOrderDispatchedSound, playWinSound } from './utils/soundEffects';
 import { Header } from './components/Header';
 import { StrongestMarketScanner } from './components/StrongestMarketScanner';
@@ -442,11 +441,6 @@ export default function App() {
             showNotice('Configured profit target reached. Auto-Matches stopped.');
             return;
           }
-          if (currentStats.cumulativeLoss >= (cfg.maxAcceptableLoss ?? 50)) {
-            handleStopAllBots();
-            showNotice('Configured loss limit reached. Auto-Matches stopped.');
-            return;
-          }
 
           const currentAnalysis = marketAnalysesRef.current[symbol];
           if (!currentAnalysis) return;
@@ -608,25 +602,14 @@ export default function App() {
         }
 
         if (!won && autoNextTradeRef.current) {
-          if (nextStats.cumulativeLoss >= recoveryCfg.stopLoss || nextStats.consecutiveLosses >= recoveryCfg.maxConsecutiveLosses) {
-            handleStopAllBots();
-            showNotice('Recovery circuit breaker reached. Automatic trading stopped.');
-            return;
-          }
-
-          const actualGrossMultiplier = settledTrade.payout > 1 ? settledTrade.payout : recoveryCfg.payoutRate;
-          const nextStake = calculateNextStake(
-            recoveryCfg.baseStake,
-            nextStats.cumulativeLoss,
-            nextStats.consecutiveLosses,
-            actualGrossMultiplier,
-            recoveryCfg.recoveryStrategy,
-          );
+          // Recovery repeats the exact losing contract stake and target.
+          // No hidden stake multiplication and no automatic loss-count stop.
+          const sameLossStake = Number(settledTrade.stake);
           setTimeout(() => {
             handlePlaceTradeRef.current({
               contractType: settledTrade.contractType,
               targetValue: settledTrade.targetValue,
-              stake: nextStake,
+              stake: Number.isFinite(sameLossStake) && sameLossStake > 0 ? sameLossStake : recoveryCfg.baseStake,
               symbol: settledTrade.symbol,
             });
           }, 150);
