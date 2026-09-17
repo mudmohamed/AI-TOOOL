@@ -33,6 +33,7 @@ import { DeepScanAutoMatches } from './components/DeepScanAutoMatches';
 import { BulkMultiTrader } from './components/BulkMultiTrader';
 import { FloatingAutoMatchesBar } from './components/FloatingAutoMatchesBar';
 import { AutoMatchesSafetyModal } from './components/AutoMatchesSafetyModal';
+import { AutoTradingSystemHero } from './components/AutoTradingSystemHero';
 import {
   Activity,
   Layers,
@@ -787,6 +788,29 @@ export default function App() {
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
+        <AutoTradingSystemHero
+          isRunning={autoMatchesActive}
+          onToggleRun={handleToggleAutoMatches}
+          config={autoMatchesConfig}
+          onConfigChange={(config) => {
+            setAutoMatchesConfig(config);
+            try { localStorage.setItem('deriv_auto_matches_config', JSON.stringify(config)); } catch {}
+          }}
+          currentSymbol={currentSymbol}
+          onSelectSymbol={handleSelectSymbol}
+          symbols={POPULAR_SYMBOLS}
+          currentPrice={currentPrice}
+          lastDigit={lastDigit}
+          pip={pip}
+          targetDigit={currentAnalysis?.hotDigit}
+          accountInfo={accountInfo}
+          sessionStats={sessionStats}
+          tradeHistory={tradeHistory}
+          onOpenSafetyModal={() => setIsSafetyModalOpen(true)}
+          onOpenConnectModal={() => setIsConnectModalOpen(true)}
+          onResetSession={handleResetSession}
+        />
+
         {activeBot !== 'NONE' && (
           <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/80 via-slate-900 to-cyan-950/80 border border-emerald-500/50 flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
