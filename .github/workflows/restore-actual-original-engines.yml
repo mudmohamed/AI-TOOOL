@@ -23,14 +23,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Do not touch current exact-stake live execution behavior.
           grep -Fq "sameLossStake" src/App.tsx
           ! grep -Fq "calculateNextStake(" src/App.tsx
           ! grep -Fq "Configured loss limit reached. Auto-Matches stopped." src/App.tsx
 
           mkdir -p /tmp/original-engines
-          base64 -d .restore/original_engines_exact.tar.gz.b64 > /tmp/original-engines.tar.gz
+          cat .restore/original_engines_exact.part00 .restore/original_engines_exact.part01 .restore/original_engines_exact.part02 .restore/original_engines_exact.part03 | base64 -d > /tmp/original-engines.tar.gz
           echo "96e0d8b4fe631d677623e6cde49905e2dcc8441561c80d053535af76902bd96e  /tmp/original-engines.tar.gz" | sha256sum -c -
           tar -xzf /tmp/original-engines.tar.gz -C /tmp/original-engines
           cp -a /tmp/original-engines/src/components/DigitProfitabilityHeatmap.tsx src/components/
@@ -41,8 +39,6 @@ jobs:
 
           python - <<'PY'
           from pathlib import Path
-
-          # Add only compatibility types required by the untouched original engine files.
           p = Path('src/types.ts')
           s = p.read_text()
           if 'export interface SessionStats' not in s:
@@ -50,25 +46,20 @@ jobs:
               block = '''export interface SessionStats {\n  totalTrades: number;\n  wins: number;\n  losses: number;\n  netProfit: number;\n  consecutiveLosses: number;\n  cumulativeLoss: number;\n  peakDrawdown: number;\n  peakProfit?: number;\n  vaultedProfit?: number;\n}\n\n'''
               if anchor not in s: raise SystemExit('RiskConfig anchor missing')
               s = s.replace(anchor, block + anchor, 1)
-
           if 'export interface BacktestConfig' not in s:
               anchor = 'export interface DBotXmlDefinition {'
               block = '''export interface BacktestConfig {\n  symbol: string;\n  sampleTicks: number;\n  strategy: 'DIFFERS_ACCOUNT_GROWER' | 'CONFIRMED_MATCHES_SNIPER' | 'OVER_UNDER_PROBABILITY' | 'REPEAT_DIGIT_MOMENTUM';\n  contractMode: 'DIFFERS' | 'MATCHES' | 'UNDER' | 'OVER';\n  stake: number;\n  stakeMode: 'FIXED_STAKE' | 'SMART_RECOVERY' | 'MARTINGALE';\n  maxStakeCap: number;\n  martingaleMultiplier: number;\n  maxAllowedLosses: number;\n  takeProfit: number;\n  stopLoss: number;\n  minConfidenceThreshold: number;\n}\n\nexport interface BacktestTrade {\n  tradeIndex: number;\n  tickIndex: number;\n  quote: number;\n  entryDigit: number;\n  targetDigit: number | string;\n  contractType: string;\n  exitPrice: number;\n  exitDigit: number;\n  won: boolean;\n  stake: number;\n  profit: number;\n  balanceAfter: number;\n  cumulativeProfit: number;\n  consecutiveLosses: number;\n}\n\nexport interface BacktestResult {\n  config: BacktestConfig;\n  symbol: string;\n  totalTicksTested: number;\n  totalTrades: number;\n  wins: number;\n  losses: number;\n  winRate: number;\n  initialBalance: number;\n  finalBalance: number;\n  netProfit: number;\n  profitFactor: number;\n  maxDrawdown: number;\n  maxDrawdownPct: number;\n  maxConsecutiveWins: number;\n  maxConsecutiveLosses: number;\n  trades: BacktestTrade[];\n  equityCurve: Array<{ trade: number; balance: number; profit: number }>;\n}\n\n'''
               if anchor not in s: raise SystemExit('DBotXmlDefinition anchor missing')
               s = s.replace(anchor, block + anchor, 1)
-
-          # Restore optional original Auto-Matches configuration fields used by the original backtester.
-          am_anchor = "  market?: string;"
-          extras = '''  maxStakeCap?: number;\n  fixedStakeMode?: boolean;\n  maxAllowedLosses?: number;\n'''
           if 'fixedStakeMode?: boolean' not in s:
-              idx = s.find(am_anchor, s.find('export interface AutoMatchesConfig'))
-              if idx < 0: raise SystemExit('AutoMatchesConfig market anchor missing')
-              line_end = s.find('\n', idx) + 1
-              s = s[:line_end] + extras + s[line_end:]
-          # Expand compatible unions without changing live execution branches.
+              idx = s.find('  market?: string;', s.find('export interface AutoMatchesConfig'))
+              if idx < 0: raise SystemExit('AutoMatchesConfig anchor missing')
+              e = s.find('\n', idx) + 1
+              s = s[:e] + '  maxStakeCap?: number;\n  fixedStakeMode?: boolean;\n  maxAllowedLosses?: number;\n' + s[e:]
           s = s.replace("nextTradeCondition?: 'RESET_ON_WIN';", "nextTradeCondition?: 'FIXED_STAKE' | 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';")
           s = s.replace("targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM';", "targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS' | 'DIFFERS_SAFE_GROWTH';")
-          if 'contractMode?:' not in s[s.find('export interface AutoMatchesConfig'):s.find('export interface RiskConfig')]:
+          section = s[s.find('export interface AutoMatchesConfig'):s.find('export interface RiskConfig')]
+          if 'contractMode?:' not in section:
               marker = '  customTargetDigit?: number;\n'
               s = s.replace(marker, marker + "  contractMode?: 'MATCHES' | 'DIFFERS' | 'OVER_UNDER' | 'EVEN_ODD';\n  onlyWhenSignalConfirmed?: boolean;\n  minConfidenceThreshold?: number;\n", 1)
           p.write_text(s)
@@ -76,67 +67,46 @@ jobs:
           p = Path('src/services/derivWs.ts')
           s = p.read_text()
           if 'export const POPULAR_DERIV_SYMBOLS' not in s:
-              # Insert after import block rather than replacing any connection/trading implementation.
-              marker = "import { DerivAccountInfo } from '../types';\n"
-              if marker not in s:
-                  marker = "from '../types';\n"
+              marker = "from '../types';\n"
               pos = s.find(marker)
               if pos < 0: raise SystemExit('derivWs types import missing')
               pos += len(marker)
-              const = "\nexport const POPULAR_DERIV_SYMBOLS = ['1HZ10V','1HZ25V','1HZ50V','1HZ75V','1HZ100V','R_10','R_25','R_50','R_75','R_100','stpRNG','JD10','JD25','JD50'];\n"
-              s = s[:pos] + const + s[pos:]
+              s = s[:pos] + "\nexport const POPULAR_DERIV_SYMBOLS = ['1HZ10V','1HZ25V','1HZ50V','1HZ75V','1HZ100V','R_10','R_25','R_50','R_75','R_100','stpRNG','JD10','JD25','JD50'];\n" + s[pos:]
               p.write_text(s)
 
           p = Path('src/App.tsx')
           s = p.read_text()
-          import_anchor = "import { AutoMatchesSafetyModal } from './components/AutoMatchesSafetyModal';\n"
-          imports = "import { RecoveryPerformanceChart } from './components/RecoveryPerformanceChart';\nimport { StrategyBacktesterTab } from './components/StrategyBacktesterTab';\nimport { DigitProfitabilityHeatmap } from './components/DigitProfitabilityHeatmap';\n"
+          a = "import { AutoMatchesSafetyModal } from './components/AutoMatchesSafetyModal';\n"
           if "./components/RecoveryPerformanceChart" not in s:
-              if import_anchor not in s: raise SystemExit('App import anchor missing')
-              s = s.replace(import_anchor, import_anchor + imports, 1)
-
-          old_union = "const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('OVERVIEW');"
-          new_union = "const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN' | 'BACKTEST' | 'HEATMAP'>('OVERVIEW');"
-          if old_union in s:
-              s = s.replace(old_union, new_union, 1)
-
-          tab_anchor = "              ['RECOVERY', 'Recovery', ShieldCheck],\n"
+              s = s.replace(a, a + "import { RecoveryPerformanceChart } from './components/RecoveryPerformanceChart';\nimport { StrategyBacktesterTab } from './components/StrategyBacktesterTab';\nimport { DigitProfitabilityHeatmap } from './components/DigitProfitabilityHeatmap';\n", 1)
+          old = "const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('OVERVIEW');"
+          new = "const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN' | 'BACKTEST' | 'HEATMAP'>('OVERVIEW');"
+          s = s.replace(old, new, 1)
+          t = "              ['RECOVERY', 'Recovery', ShieldCheck],\n"
           if "['BACKTEST', 'Real Backtester'" not in s:
-              if tab_anchor not in s: raise SystemExit('App tab anchor missing')
-              s = s.replace(tab_anchor, tab_anchor + "              ['BACKTEST', 'Real Backtester', Activity],\n              ['HEATMAP', 'Profit Heatmap', Target],\n", 1)
-
-          chart_anchor = '''        <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60 space-y-4">\n          <LiveChart prices={prices} digits={digits} symbol={currentSymbol} pip={pip} currentPrice={currentPrice} />\n          {currentAnalysis && <IndicatorsPanel analysis={currentAnalysis} pip={pip} />}\n        </div>\n'''
+              s = s.replace(t, t + "              ['BACKTEST', 'Real Backtester', Activity],\n              ['HEATMAP', 'Profit Heatmap', Target],\n", 1)
+          chart = '''        <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60 space-y-4">\n          <LiveChart prices={prices} digits={digits} symbol={currentSymbol} pip={pip} currentPrice={currentPrice} />\n          {currentAnalysis && <IndicatorsPanel analysis={currentAnalysis} pip={pip} />}\n        </div>\n'''
           if '<RecoveryPerformanceChart' not in s:
-              block = '''\n        {activeTab === 'OVERVIEW' && (\n          <RecoveryPerformanceChart\n            tradeHistory={tradeHistory}\n            sessionStats={sessionStats}\n            expectedProfitTarget={autoMatchesConfig.expectedProfit ?? 20}\n            maxLossLimit={autoMatchesConfig.maxAcceptableLoss ?? 50}\n            onClearSession={handleResetSession}\n            isRunning={activeBot !== 'NONE' || autoMatchesActive || autoNextTrade}\n          />\n        )}\n'''
-              if chart_anchor not in s: raise SystemExit('Live chart anchor missing')
-              s = s.replace(chart_anchor, chart_anchor + block, 1)
-
-          matches_anchor = "        {(activeTab === 'OVERVIEW' || activeTab === 'MATCHES') && (\n"
+              block = '''\n        {activeTab === 'OVERVIEW' && (\n          <RecoveryPerformanceChart tradeHistory={tradeHistory} sessionStats={sessionStats} expectedProfitTarget={autoMatchesConfig.expectedProfit ?? 20} maxLossLimit={autoMatchesConfig.maxAcceptableLoss ?? 50} onClearSession={handleResetSession} isRunning={activeBot !== 'NONE' || autoMatchesActive || autoNextTrade} />\n        )}\n'''
+              if chart not in s: raise SystemExit('Live chart anchor missing')
+              s = s.replace(chart, chart + block, 1)
+          ma = "        {(activeTab === 'OVERVIEW' || activeTab === 'MATCHES') && (\n"
           if '<DigitProfitabilityHeatmap' not in s:
-              block = '''        {(activeTab === 'OVERVIEW' || activeTab === 'HEATMAP') && (\n          <DigitProfitabilityHeatmap\n            tradeHistory={tradeHistory}\n            currentAnalysis={currentAnalysis}\n            currentPrice={currentPrice}\n            lastDigit={lastDigit}\n            currentSymbol={currentSymbol}\n            accountMode={accountMode}\n            accountInfo={accountInfo}\n            currentBalance={currentBalance}\n            netProfit={sessionStats.netProfit}\n            onExecuteTrade={({ contractType, targetValue, stake }) => handlePlaceTrade({ contractType, targetValue, stake, symbol: currentSymbol, entryPrice: currentPrice, entryDigit: lastDigit })}\n            onOpenConnectDeriv={() => setIsConnectModalOpen(true)}\n            onSelectBotTarget={(digit) => setAutoMatchesConfig((prev) => ({ ...prev, customTargetDigit: digit }))}\n          />\n        )}\n\n'''
-              if matches_anchor not in s: raise SystemExit('Matches anchor missing')
-              s = s.replace(matches_anchor, block + matches_anchor, 1)
-
+              block = '''        {(activeTab === 'OVERVIEW' || activeTab === 'HEATMAP') && (\n          <DigitProfitabilityHeatmap tradeHistory={tradeHistory} currentAnalysis={currentAnalysis} currentPrice={currentPrice} lastDigit={lastDigit} currentSymbol={currentSymbol} accountMode={accountMode} accountInfo={accountInfo} currentBalance={currentBalance} netProfit={sessionStats.netProfit} onExecuteTrade={({ contractType, targetValue, stake }) => handlePlaceTrade({ contractType, targetValue, stake, symbol: currentSymbol, entryPrice: currentPrice, entryDigit: lastDigit })} onOpenConnectDeriv={() => setIsConnectModalOpen(true)} onSelectBotTarget={(digit) => setAutoMatchesConfig((prev) => ({ ...prev, customTargetDigit: digit }))} />\n        )}\n\n'''
+              if ma not in s: raise SystemExit('Matches anchor missing')
+              s = s.replace(ma, block + ma, 1)
           if '<StrategyBacktesterTab' not in s:
-              block = '''\n        {activeTab === 'BACKTEST' && (\n          <StrategyBacktesterTab\n            currentSymbol={currentSymbol}\n            marketTicks={marketTickDataRef.current}\n            onApplyStrategyToLiveBot={(config) => {\n              setAutoMatchesConfig((prev) => ({ ...prev, ...config }));\n              setActiveTab('DEEP_SCAN');\n            }}\n            onNavigateToTrader={() => setActiveTab('DEEP_SCAN')}\n          />\n        )}\n'''
-              close_main = s.rfind('      </main>')
-              if close_main < 0: raise SystemExit('main closing tag missing')
-              s = s[:close_main] + block + s[close_main:]
+              block = '''\n        {activeTab === 'BACKTEST' && (\n          <StrategyBacktesterTab currentSymbol={currentSymbol} marketTicks={marketTickDataRef.current} onApplyStrategyToLiveBot={(config) => { setAutoMatchesConfig((prev) => ({ ...prev, ...config })); setActiveTab('DEEP_SCAN'); }} onNavigateToTrader={() => setActiveTab('DEEP_SCAN')} />\n        )}\n'''
+              pos = s.rfind('      </main>')
+              if pos < 0: raise SystemExit('main close missing')
+              s = s[:pos] + block + s[pos:]
           p.write_text(s)
           PY
 
           npm install recharts@^3.10.1 --save --no-audit --no-fund
-
-          # Verify untouched engine files exist and current live execution logic is preserved.
           grep -Fq "sameLossStake" src/App.tsx
           ! grep -Fq "calculateNextStake(" src/App.tsx
           ! grep -Fq "Configured loss limit reached. Auto-Matches stopped." src/App.tsx
-          test -f src/components/DigitProfitabilityHeatmap.tsx
-          test -f src/components/RecoveryPerformanceChart.tsx
-          test -f src/components/StrategyBacktesterTab.tsx
-          test -f src/utils/backtestEngine.ts
-          test -f src/utils/csvExport.ts
-
           npm run lint
           npm run build
 
