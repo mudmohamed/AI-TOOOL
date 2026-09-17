@@ -1,0 +1,110 @@
+name: Restore full original engines v2
+
+on:
+  push:
+    branches: [restore-full-original-engines-20260917]
+    paths:
+      - '.github/workflows/restore-full-original-engines-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Restore exact missing original engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq "sameLossStake" src/App.tsx
+          ! grep -Fq "calculateNextStake(" src/App.tsx
+          ! grep -Fq "Configured loss limit reached. Auto-Matches stopped." src/App.tsx
+
+          rm -rf /tmp/original-src .restore
+          mkdir -p /tmp/original-src
+          git checkout origin/full-system-restore-20260915 -- .restore
+          cat .restore/full_restore_payload.b64.part00 .restore/full_restore_payload.b64.part01 | base64 -d > /tmp/original.tar.gz
+          tar -xzf /tmp/original.tar.gz -C /tmp/original-src
+          ORIGINAL_APP=$(find /tmp/original-src -type f -path '*/src/App.tsx' -print -quit)
+          test -n "$ORIGINAL_APP"
+          ORIGINAL_ROOT=$(dirname "$(dirname "$ORIGINAL_APP")")
+
+          for f in src/components/DigitProfitabilityHeatmap.tsx src/components/RecoveryPerformanceChart.tsx src/components/StrategyBacktesterTab.tsx src/utils/backtestEngine.ts src/utils/csvExport.ts; do
+            test -f "$ORIGINAL_ROOT/$f"
+            mkdir -p "$(dirname "$f")"
+            cp "$ORIGINAL_ROOT/$f" "$f"
+          done
+
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/types.ts')
+          s = p.read_text()
+          if 'export interface SessionStats' not in s:
+              a = 'export interface RiskConfig {'
+              b = "export interface SessionStats {\n  totalTrades: number;\n  wins: number;\n  losses: number;\n  netProfit: number;\n  consecutiveLosses: number;\n  cumulativeLoss: number;\n  peakDrawdown: number;\n  peakProfit?: number;\n  vaultedProfit?: number;\n}\n\n"
+              s = s.replace(a, b + a, 1)
+              p.write_text(s)
+
+          p = Path('src/services/derivWs.ts')
+          s = p.read_text()
+          if 'export const POPULAR_DERIV_SYMBOLS' not in s:
+              pos = s.find('\n', s.find("from '../types'")) + 1 if "from '../types'" in s else 0
+              b = "\nexport const POPULAR_DERIV_SYMBOLS = [\n  '1HZ10V','1HZ25V','1HZ50V','1HZ75V','1HZ100V','R_10','R_25','R_50','R_75','R_100','stpRNG','JD10','JD25','JD50',\n];\n"
+              s = s[:pos] + b + s[pos:]
+              p.write_text(s)
+
+          p = Path('src/App.tsx')
+          s = p.read_text()
+          anchor = "import { AutoMatchesSafetyModal } from './components/AutoMatchesSafetyModal';\n"
+          if "./components/RecoveryPerformanceChart" not in s:
+              s = s.replace(anchor, anchor + "import { RecoveryPerformanceChart } from './components/RecoveryPerformanceChart';\nimport { StrategyBacktesterTab } from './components/StrategyBacktesterTab';\nimport { DigitProfitabilityHeatmap } from './components/DigitProfitabilityHeatmap';\n", 1)
+
+          old = "const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('OVERVIEW');"
+          new = "const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN' | 'BACKTEST' | 'HEATMAP'>('OVERVIEW');"
+          s = s.replace(old, new, 1)
+
+          tab = "              ['RECOVERY', 'Recovery', ShieldCheck],\n"
+          if "['BACKTEST', 'Real Backtester'" not in s:
+              s = s.replace(tab, tab + "              ['BACKTEST', 'Real Backtester', Activity],\n              ['HEATMAP', 'Profit Heatmap', Target],\n", 1)
+
+          live = '''        <div className="p-4 rounded-2xl border border-slate-800 bg-slate-900/60 space-y-4">\n          <LiveChart prices={prices} digits={digits} symbol={currentSymbol} pip={pip} currentPrice={currentPrice} />\n          {currentAnalysis && <IndicatorsPanel analysis={currentAnalysis} pip={pip} />}\n        </div>\n'''
+          if '<RecoveryPerformanceChart' not in s:
+              add = '''\n        {activeTab === 'OVERVIEW' && (\n          <RecoveryPerformanceChart tradeHistory={tradeHistory} sessionStats={sessionStats} expectedProfitTarget={autoMatchesConfig.expectedProfit ?? 20} maxLossLimit={autoMatchesConfig.maxAcceptableLoss ?? 50} onClearSession={handleResetSession} isRunning={activeBot !== 'NONE' || autoMatchesActive || autoNextTrade} />\n        )}\n'''
+              if live not in s: raise SystemExit('live chart anchor missing')
+              s = s.replace(live, live + add, 1)
+
+          ma = "        {(activeTab === 'OVERVIEW' || activeTab === 'MATCHES') && (\n"
+          if '<DigitProfitabilityHeatmap' not in s:
+              add = '''        {(activeTab === 'OVERVIEW' || activeTab === 'HEATMAP') && (\n          <DigitProfitabilityHeatmap\n            tradeHistory={tradeHistory}\n            currentAnalysis={currentAnalysis}\n            currentPrice={currentPrice}\n            lastDigit={lastDigit}\n            currentSymbol={currentSymbol}\n            accountMode={accountMode}\n            accountInfo={accountInfo}\n            currentBalance={currentBalance}\n            netProfit={sessionStats.netProfit}\n            onExecuteTrade={({ contractType, targetValue, stake }) => handlePlaceTrade({ contractType, targetValue, stake, symbol: currentSymbol, entryPrice: currentPrice, entryDigit: lastDigit })}\n            onOpenConnectDeriv={() => setIsConnectModalOpen(true)}\n            onSelectBotTarget={(digit) => setAutoMatchesConfig((prev) => ({ ...prev, customTargetDigit: digit }))}\n          />\n        )}\n\n'''
+              if ma not in s: raise SystemExit('matches anchor missing')
+              s = s.replace(ma, add + ma, 1)
+
+          if '<StrategyBacktesterTab' not in s:
+              add = '''\n        {activeTab === 'BACKTEST' && (\n          <StrategyBacktesterTab\n            currentSymbol={currentSymbol}\n            marketTicks={marketTickDataRef.current}\n            onApplyStrategyToLiveBot={(config) => { setAutoMatchesConfig((prev) => ({ ...prev, ...config })); setActiveTab('DEEP_SCAN'); }}\n            onNavigateToTrader={() => setActiveTab('DEEP_SCAN')}\n          />\n        )}\n'''
+              pos = s.rfind('      </main>')
+              if pos < 0: raise SystemExit('main close missing')
+              s = s[:pos] + add + s[pos:]
+          p.write_text(s)
+          PY
+
+          npm install recharts@^3.10.1 --save --no-audit --no-fund
+          grep -Fq "sameLossStake" src/App.tsx
+          ! grep -Fq "calculateNextStake(" src/App.tsx
+          ! grep -Fq "Configured loss limit reached. Auto-Matches stopped." src/App.tsx
+          npm run lint
+          npm run build
+
+          rm -rf .restore .github/workflows/restore-full-original-engines.yml .github/workflows/restore-full-original-engines-v2.yml
+          git config user.name 'Restore Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git commit -m 'Restore full original engines without changing winning execution'
+          git push origin HEAD:restore-full-original-engines-20260917
