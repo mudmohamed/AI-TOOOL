@@ -28,8 +28,8 @@ jobs:
           ! grep -Fq "Configured loss limit reached. Auto-Matches stopped." src/App.tsx
 
           mkdir -p /tmp/original-engines
-          cat .restore/original_engines_exact.part00 .restore/original_engines_exact.part01 .restore/original_engines_exact.part02 .restore/original_engines_exact.part03 | base64 -d > /tmp/original-engines.tar.gz
-          echo "96e0d8b4fe631d677623e6cde49905e2dcc8441561c80d053535af76902bd96e  /tmp/original-engines.tar.gz" | sha256sum -c -
+          cat .restore/verified00 .restore/verified01 .restore/verified02 .restore/verified03 .restore/verified04 .restore/verified05 .restore/verified06 .restore/verified07 .restore/verified08a .restore/verified08b | base64 -d > /tmp/original-engines.tar.gz
+          echo "7e81a361365797ab05373b9d244e445dd3536e17138142cd536236440780ac82  /tmp/original-engines.tar.gz" | sha256sum -c -
           tar -xzf /tmp/original-engines.tar.gz -C /tmp/original-engines
           cp -a /tmp/original-engines/src/components/DigitProfitabilityHeatmap.tsx src/components/
           cp -a /tmp/original-engines/src/components/RecoveryPerformanceChart.tsx src/components/
