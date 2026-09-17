@@ -1,0 +1,124 @@
+name: Restore exact untouched engines
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/restore-exact-untouched-engines.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch preserved restore branch
+        run: git fetch origin restore-exact-fixed-20260915-v2
+
+      - name: Find payload that exactly matches untouched App engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/candidates /tmp/match
+          mkdir -p /tmp/candidates
+
+          try_payload() {
+            local label="$1"
+            local glob="$2"
+            local b64="/tmp/candidates/${label}.b64"
+            local bin="/tmp/candidates/${label}.bin"
+            local out="/tmp/candidates/${label}-out"
+            : > "$b64"
+            local found=0
+            for f in $(git ls-tree -r --name-only origin/restore-exact-fixed-20260915-v2 | grep -E "$glob" | sort); do
+              found=1
+              git show "origin/restore-exact-fixed-20260915-v2:$f" >> "$b64"
+            done
+            [ "$found" = 1 ] || return 0
+            base64 -d "$b64" > "$bin" || return 0
+            mkdir -p "$out"
+            python - "$bin" "$out" <<'PY'
+          import sys, tarfile, zipfile, gzip, shutil, os
+          src, out = sys.argv[1], sys.argv[2]
+          ok=False
+          try:
+              with tarfile.open(src, 'r:*') as t:
+                  t.extractall(out); ok=True
+          except Exception:
+              pass
+          if not ok:
+              try:
+                  with zipfile.ZipFile(src) as z:
+                      z.extractall(out); ok=True
+              except Exception:
+                  pass
+          if not ok:
+              try:
+                  with gzip.open(src, 'rb') as g, open(os.path.join(out,'payload.raw'),'wb') as w:
+                      shutil.copyfileobj(g,w); ok=True
+              except Exception:
+                  pass
+          print('extracted', ok)
+          PY
+            local app
+            app=$(find "$out" -type f -path '*/src/App.tsx' -print -quit || true)
+            if [ -n "$app" ]; then
+              echo "$label App: $(sha256sum "$app")"
+              if [ "$(sha256sum "$app" | awk '{print $1}')" = "e2054ac3cd293f6c0700141b2f1c1e53bf067de8b8329410937634aab62d25f0" ]; then
+                rm -rf /tmp/match
+                mkdir -p /tmp/match
+                cp -a "$out"/. /tmp/match/
+              fi
+            fi
+          }
+
+          try_payload overlay '^\.restore-exact/overlay\.b64\.part[0-9]+$'
+          try_payload payload '^\.restore/payload\.b64\.part[0-9]+$'
+
+          test -f "$(find /tmp/match -type f -path '*/src/App.tsx' -print -quit)"
+          echo "Exact untouched App payload verified."
+
+      - name: Locate extracted project root and verify critical original engines
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find /tmp/match -type f -path '*/src/App.tsx' -print -quit)
+          ROOT=${APP%/src/App.tsx}
+          echo "ROOT=$ROOT" >> "$GITHUB_ENV"
+          cd "$ROOT"
+          echo 'e2054ac3cd293f6c0700141b2f1c1e53bf067de8b8329410937634aab62d25f0  src/App.tsx' | sha256sum -c -
+          [ ! -f src/utils/autoMatchesEngine.ts ] || echo '1206056592edabbbcd5498825610398be8410ca0909fd577b17e304cdf35e991  src/utils/autoMatchesEngine.ts' | sha256sum -c -
+          [ ! -f src/utils/recoveryEngine.ts ] || echo '715848847c2ec7b46d5a53f8eef6a39572ae367d74c4f1e15163e849c66a0367  src/utils/recoveryEngine.ts' | sha256sum -c -
+          [ ! -f src/utils/indicators.ts ] || echo '60ed5aa43939ddcbc63be92d45cca692a32bfa63d2ab66b0f613e778bd07bf7d  src/utils/indicators.ts' | sha256sum -c -
+          [ ! -f src/types.ts ] || echo 'f7e1c2a626cf454fe23ccf596c6012dd0106562028e5115b657b93e6d716b581  src/types.ts' | sha256sum -c -
+          [ ! -f src/services/derivWs.ts ] || echo '886e802c394811909aab7d35d50f9f3af477e3cc9cd8aa5fff8927bf8bc4cdd3  src/services/derivWs.ts' | sha256sum -c -
+
+      - name: Restore exact extracted files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -a "$ROOT"/. ./
+          rm -f src/components/AutoTradingSystemHero.tsx src/services/derivConnectionFix.ts
+
+      - name: Build exact restored system
+        run: |
+          npm install --package-lock=false
+          npm run lint
+          npm run build
+
+      - name: Commit exact original restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/restore-exact-untouched-engines.yml
+          git config user.name 'Restore Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -A
+          git commit -m 'Restore exact untouched winning engine system' || exit 0
+          git push origin HEAD:main
