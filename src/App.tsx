@@ -33,6 +33,9 @@ import { DeepScanAutoMatches } from './components/DeepScanAutoMatches';
 import { BulkMultiTrader } from './components/BulkMultiTrader';
 import { FloatingAutoMatchesBar } from './components/FloatingAutoMatchesBar';
 import { AutoMatchesSafetyModal } from './components/AutoMatchesSafetyModal';
+import { RecoveryPerformanceChart } from './components/RecoveryPerformanceChart';
+import { StrategyBacktesterTab } from './components/StrategyBacktesterTab';
+import { DigitProfitabilityHeatmap } from './components/DigitProfitabilityHeatmap';
 import { AutoTradingSystemHero } from './components/AutoTradingSystemHero';
 import {
   Activity,
@@ -244,7 +247,7 @@ export default function App() {
     profitLockTarget: 50,
   });
 
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN' | 'BACKTEST' | 'HEATMAP'>('OVERVIEW');
 
   const showNotice = useCallback((message: string, timeout = 4000) => {
     setAutoRecoveryNotice(message);
@@ -841,6 +844,8 @@ export default function App() {
               ['SCANNER', 'Strongest Signal', Zap],
               ['MATCHES', 'Matches & Differs', Target],
               ['RECOVERY', 'Recovery', ShieldCheck],
+              ['BACKTEST', 'Real Backtester', Activity],
+              ['HEATMAP', 'Profit Heatmap', Target],
             ] as const).map(([tab, label, Icon]) => (
               <button key={tab} onClick={() => setActiveTab(tab)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === tab ? 'bg-emerald-500 text-slate-950' : 'bg-slate-900 text-slate-400 border border-slate-800 hover:text-white'}`}>
                 <Icon className="w-3.5 h-3.5" /> {label}
@@ -927,6 +932,14 @@ export default function App() {
           {currentAnalysis && <IndicatorsPanel analysis={currentAnalysis} pip={pip} />}
         </div>
 
+        {activeTab === 'OVERVIEW' && (
+          <RecoveryPerformanceChart tradeHistory={tradeHistory} sessionStats={sessionStats} expectedProfitTarget={autoMatchesConfig.expectedProfit ?? 20} maxLossLimit={autoMatchesConfig.maxAcceptableLoss ?? 50} onClearSession={handleResetSession} isRunning={activeBot !== 'NONE' || autoMatchesActive || autoNextTrade} />
+        )}
+
+        {(activeTab === 'OVERVIEW' || activeTab === 'HEATMAP') && (
+          <DigitProfitabilityHeatmap tradeHistory={tradeHistory} currentAnalysis={currentAnalysis} currentPrice={currentPrice} lastDigit={lastDigit} currentSymbol={currentSymbol} accountMode={accountMode} accountInfo={accountInfo} currentBalance={currentBalance} netProfit={sessionStats.netProfit} onExecuteTrade={({ contractType, targetValue, stake }) => handlePlaceTrade({ contractType, targetValue, stake, symbol: currentSymbol, entryPrice: currentPrice, entryDigit: lastDigit })} onOpenConnectDeriv={() => setIsConnectModalOpen(true)} onSelectBotTarget={(digit) => setAutoMatchesConfig((prev) => ({ ...prev, customTargetDigit: digit }))} />
+        )}
+
         {(activeTab === 'OVERVIEW' || activeTab === 'MATCHES') && (
           <MatchesDigitAnalyzer
             digitStats={sampleAnalysis.digitStats}
@@ -961,6 +974,10 @@ export default function App() {
             isRunning={activeBot === 'SUPER_RECOVERY'}
             onToggleRun={handleToggleSuperRecoveryBot}
           />
+        )}
+
+        {activeTab === 'BACKTEST' && (
+          <StrategyBacktesterTab currentSymbol={currentSymbol} marketTicks={marketTickDataRef.current} onApplyStrategyToLiveBot={(config) => { setAutoMatchesConfig((prev) => ({ ...prev, ...config })); setActiveTab('DEEP_SCAN'); }} onNavigateToTrader={() => setActiveTab('DEEP_SCAN')} />
         )}
       </main>
 

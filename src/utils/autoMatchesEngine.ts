@@ -113,6 +113,50 @@ export function findBestAutoMatchesTarget(
   };
 }
 
+/**
+ * Evaluates the coldest / least likely digit for high-win DIFFERS trades (90%+ theoretical win rate)
+ */
+export function findBestDiffersTarget(
+  digits: number[],
+  currentDigit: number
+): { targetDigit: number; winProbability: number; rationale: string } {
+  if (digits.length < 20) {
+    const fallback = (currentDigit + 5) % 10;
+    return {
+      targetDigit: fallback,
+      winProbability: 90.0,
+      rationale: `Targeting opposite digit ${fallback} for 90% theoretical DIFFERS win rate.`,
+    };
+  }
+
+  const markovMatrix = calculateMarkovTransitionMatrix(digits);
+  const nextProbabilities = markovMatrix[currentDigit] || Array(10).fill(0.1);
+  const recentSlice = digits.slice(-30);
+  const microCounts: number[] = Array(10).fill(0);
+  recentSlice.forEach((d) => {
+    if (d >= 0 && d <= 9) microCounts[d]++;
+  });
+
+  let lowestScore = 9999;
+  let coldestDigit = (currentDigit + 5) % 10;
+  for (let d = 0; d < 10; d++) {
+    const markovProbPct = (nextProbabilities[d] ?? 0.1) * 100;
+    const microFreqPct = (microCounts[d] / recentSlice.length) * 100;
+    const score = markovProbPct * 0.6 + microFreqPct * 0.4;
+    if (score < lowestScore) {
+      lowestScore = score;
+      coldestDigit = d;
+    }
+  }
+
+  const estimatedWinRate = Number((100 - Math.min(15, lowestScore)).toFixed(1));
+  return {
+    targetDigit: coldestDigit,
+    winProbability: Math.max(88, Math.min(96, estimatedWinRate)),
+    rationale: `Digit ${coldestDigit} has the lowest transition probability (${lowestScore.toFixed(1)}%). DIFFERS contract has ~${estimatedWinRate}% empirical win expectation.`,
+  };
+}
+
 export interface SameLosingPriceRecoveryResult {
   nextStake: number;
   cumulativeLoss: number;
