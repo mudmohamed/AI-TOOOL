@@ -80,17 +80,38 @@ if 'fixedStakeMode?: boolean' not in s:
     e = s.find('\n', idx) + 1
     s = s[:e] + '  maxStakeCap?: number;\n  fixedStakeMode?: boolean;\n  maxAllowedLosses?: number;\n' + s[e:]
 
+# Update the AutoMatchesConfig fields directly. Do not use a broad section test,
+# because the BacktestConfig below it also contains FIXED_STAKE.
+s = s.replace(
+    "nextTradeCondition?: 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';",
+    "nextTradeCondition?: 'FIXED_STAKE' | 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';",
+    1,
+)
+s = s.replace(
+    "targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM';",
+    "targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS' | 'DIFFERS_SAFE_GROWTH';",
+    1,
+)
 start = s.find('export interface AutoMatchesConfig')
-end = s.find('export interface DBotXmlDefinition', start)
+end = s.find('export interface BacktestConfig', start)
+if end < 0:
+    end = s.find('export interface DBotXmlDefinition', start)
 section = s[start:end]
-if "'FIXED_STAKE'" not in section:
-    s = s.replace("nextTradeCondition?: 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';", "nextTradeCondition?: 'FIXED_STAKE' | 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';", 1)
-if "'COLD_DIFFERS'" not in section:
-    s = s.replace("targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM';", "targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS' | 'DIFFERS_SAFE_GROWTH';", 1)
 if 'contractMode?:' not in section:
     marker = '  customTargetDigit?: number;\n'
     s = s.replace(marker, marker + "  contractMode?: 'MATCHES' | 'DIFFERS' | 'OVER_UNDER' | 'EVEN_ODD';\n  onlyWhenSignalConfirmed?: boolean;\n  minConfidenceThreshold?: number;\n", 1)
 p.write_text(s)
+
+# Compatibility export required by the untouched StrategyBacktesterTab.
+p = Path('src/services/derivWs.ts')
+s = p.read_text()
+if 'export const POPULAR_DERIV_SYMBOLS' not in s:
+    import_line = "import { DerivAccountInfo } from '../types';\n"
+    if import_line not in s:
+        raise SystemExit('derivWs import anchor missing')
+    symbols = "\nexport const POPULAR_DERIV_SYMBOLS = ['1HZ10V', '1HZ25V', '1HZ50V', '1HZ75V', '1HZ100V', 'R_10', 'R_25', 'R_50', 'R_75', 'R_100'];\n"
+    s = s.replace(import_line, import_line + symbols, 1)
+    p.write_text(s)
 
 # Wire the original missing system panels into the current App without replacing
 # the current live trade placement/settlement/recovery blocks.
