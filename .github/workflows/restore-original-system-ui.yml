@@ -37,30 +37,32 @@ jobs:
               s = s.replace(import_anchor, import_anchor + import_line, 1)
 
           main_anchor = '      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">\n'
-          hero = '''        <AutoTradingSystemHero
-          isRunning={autoMatchesActive}
-          onToggleRun={handleToggleAutoMatches}
-          config={autoMatchesConfig}
-          onConfigChange={(config) => {
-            setAutoMatchesConfig(config);
-            try { localStorage.setItem('deriv_auto_matches_config', JSON.stringify(config)); } catch {}
-          }}
-          currentSymbol={currentSymbol}
-          onSelectSymbol={handleSelectSymbol}
-          symbols={POPULAR_SYMBOLS}
-          currentPrice={currentPrice}
-          lastDigit={lastDigit}
-          pip={pip}
-          targetDigit={currentAnalysis?.hotDigit}
-          accountInfo={accountInfo}
-          sessionStats={sessionStats}
-          tradeHistory={tradeHistory}
-          onOpenSafetyModal={() => setIsSafetyModalOpen(true)}
-          onOpenConnectModal={() => setIsConnectModalOpen(true)}
-          onResetSession={handleResetSession}
-        />
-
-'''
+          hero_lines = [
+              '        <AutoTradingSystemHero',
+              '          isRunning={autoMatchesActive}',
+              '          onToggleRun={handleToggleAutoMatches}',
+              '          config={autoMatchesConfig}',
+              '          onConfigChange={(config) => {',
+              '            setAutoMatchesConfig(config);',
+              "            try { localStorage.setItem('deriv_auto_matches_config', JSON.stringify(config)); } catch {}",
+              '          }}',
+              '          currentSymbol={currentSymbol}',
+              '          onSelectSymbol={handleSelectSymbol}',
+              '          symbols={POPULAR_SYMBOLS}',
+              '          currentPrice={currentPrice}',
+              '          lastDigit={lastDigit}',
+              '          pip={pip}',
+              '          targetDigit={currentAnalysis?.hotDigit}',
+              '          accountInfo={accountInfo}',
+              '          sessionStats={sessionStats}',
+              '          tradeHistory={tradeHistory}',
+              '          onOpenSafetyModal={() => setIsSafetyModalOpen(true)}',
+              '          onOpenConnectModal={() => setIsConnectModalOpen(true)}',
+              '          onResetSession={handleResetSession}',
+              '        />',
+              '',
+          ]
+          hero = '\n'.join(hero_lines) + '\n'
           if '<AutoTradingSystemHero' not in s:
               if main_anchor not in s:
                   raise SystemExit('main UI anchor not found')
@@ -69,7 +71,6 @@ jobs:
           p.write_text(s)
           PY
 
-          # Guardrails: preserve the current exact-stake and same-loss recovery execution.
           grep -Fq "sameLossStake" src/App.tsx
           ! grep -Fq "calculateNextStake(" src/App.tsx
           ! grep -Fq "Configured loss limit reached. Auto-Matches stopped." src/App.tsx
