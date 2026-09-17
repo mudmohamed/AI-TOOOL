@@ -3,39 +3,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React from 'react';
 import {
-  Play,
-  Square,
-  Zap,
-  Target,
-  ShieldCheck,
-  Key,
-  Lock,
-  RotateCcw,
+  Activity,
   CheckCircle2,
-  AlertCircle,
-  TrendingUp,
-  Settings,
-  Bot,
+  CircleDollarSign,
+  Gauge,
+  Lock,
+  Play,
   Radio,
-  Clock,
-  Sparkles,
-  ArrowRight,
+  RotateCcw,
+  Settings,
+  ShieldCheck,
+  Square,
+  Target,
+  Wallet,
+  Zap,
 } from 'lucide-react';
 import { AutoMatchesConfig, DerivAccountInfo, TradeRecord } from '../types';
-
-type ExtendedAutoMatchesConfig = AutoMatchesConfig & {
-  stopConditionMode?: 'ONLY_MANUAL_OR_TARGET' | 'STOP_ON_MAX_LOSS';
-  profitShieldActive?: boolean;
-  profitLockEnabled?: boolean;
-  profitLockTarget?: number;
-  fixedStakeMode?: boolean;
-  maxStakeCap?: number;
-  maxAllowedLosses?: number;
-  contractMode?: 'DIFFERS' | 'OVER_UNDER' | 'MATCHES';
-  onlyWhenSignalConfirmed?: boolean;
-};
 
 interface SessionStats {
   totalTrades: number;
@@ -50,8 +35,8 @@ interface SessionStats {
 interface AutoTradingSystemHeroProps {
   isRunning: boolean;
   onToggleRun: (running: boolean) => void;
-  config: ExtendedAutoMatchesConfig;
-  onConfigChange: (config: ExtendedAutoMatchesConfig) => void;
+  config: AutoMatchesConfig;
+  onConfigChange: (config: AutoMatchesConfig) => void;
   currentSymbol: string;
   onSelectSymbol: (symbol: string) => void;
   symbols: { symbol: string; name: string }[];
@@ -65,7 +50,6 @@ interface AutoTradingSystemHeroProps {
   onOpenSafetyModal: () => void;
   onOpenConnectModal: () => void;
   onResetSession: () => void;
-  onVaultWonProfit?: () => void;
 }
 
 export const AutoTradingSystemHero: React.FC<AutoTradingSystemHeroProps> = ({
@@ -86,218 +70,245 @@ export const AutoTradingSystemHero: React.FC<AutoTradingSystemHeroProps> = ({
   onOpenSafetyModal,
   onOpenConnectModal,
   onResetSession,
-  onVaultWonProfit,
 }) => {
-  const [tokenNotice, setTokenNotice] = useState<string | null>(null);
-  const [showConfigDrawer, setShowConfigDrawer] = useState(false);
-
-  const tpTarget = config.expectedProfit || 10000;
-  const currentNetProfit = sessionStats.netProfit || 0;
-  const tpProgressPct = Math.min(100, Math.max(0, Number(((currentNetProfit / tpTarget) * 100).toFixed(1))));
-  const is247NonStop = (config.stopConditionMode || 'ONLY_MANUAL_OR_TARGET') === 'ONLY_MANUAL_OR_TARGET';
   const isAuthorized = Boolean(accountInfo.isAuthorized);
-  const isRealAccount = isAuthorized && !accountInfo.isVirtual && accountInfo.loginId !== 'VRTC-PRACTICE';
-
-  const handleSwitchToDemo = () => {
-    setTokenNotice('Choose DEMO in the secure Deriv account selector.');
-    onOpenConnectModal();
-  };
-
-  const handleQuickStakeChange = (stakeVal: number) => {
-    onConfigChange({
-      ...config,
-      stake: stakeVal,
-      winAmount: stakeVal,
-    });
-  };
-
-  const handleQuickTpChange = (targetVal: number) => {
-    onConfigChange({
-      ...config,
-      expectedProfit: targetVal,
-    });
-  };
-
+  const isRealAccount = isAuthorized && !accountInfo.isVirtual;
+  const currency = accountInfo.currency || 'USD';
+  const expectedProfit = Number(config.expectedProfit ?? 20);
+  const stake = Number(config.stake || 0.35);
+  const progress = expectedProfit > 0
+    ? Math.max(0, Math.min(100, (sessionStats.netProfit / expectedProfit) * 100))
+    : 0;
   const winRate = sessionStats.totalTrades > 0
-    ? ((sessionStats.wins / sessionStats.totalTrades) * 100).toFixed(1)
-    : '0.0';
+    ? (sessionStats.wins / sessionStats.totalTrades) * 100
+    : 0;
+  const pendingCount = tradeHistory.filter((trade) => trade.status === 'PENDING').length;
+  const matchesWins = tradeHistory.filter((trade) => trade.contractType === 'MATCHES' && trade.status === 'WON').length;
+
+  const setStake = (value: number) => {
+    onConfigChange({
+      ...config,
+      stake: value,
+      winAmount: value,
+    });
+  };
+
+  const setTargetProfit = (value: number) => {
+    onConfigChange({
+      ...config,
+      expectedProfit: value,
+    });
+  };
 
   return (
     <section
       id="auto-trading-system-hero"
-      className="rounded-3xl border-2 border-emerald-500/50 bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950/40 p-5 sm:p-7 shadow-2xl relative overflow-hidden"
+      className="relative overflow-hidden rounded-3xl border-2 border-emerald-500/45 bg-gradient-to-br from-slate-950 via-slate-900 to-emerald-950/35 shadow-2xl"
     >
-      {/* Background ambient lighting effects */}
-      <div className="absolute top-0 right-0 -mr-20 -mt-20 w-80 h-80 rounded-full bg-emerald-500/10 blur-3xl pointer-events-none" />
-      <div className="absolute bottom-0 left-0 -ml-20 -mb-20 w-80 h-80 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none" />
+      <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-emerald-500/10 blur-3xl" />
+      <div className="pointer-events-none absolute -bottom-24 -left-24 h-64 w-64 rounded-full bg-cyan-500/10 blur-3xl" />
 
-      {/* Main Header & Live System Status Badge */}
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 pb-5 border-b border-slate-800 relative z-10">
-        <div className="space-y-1.5">
-          <div className="flex items-center gap-2.5 flex-wrap">
-            <span className="px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/60 text-emerald-300 text-xs font-mono font-black flex items-center gap-1.5 tracking-wider uppercase shadow-inner">
-              <Bot className="w-3.5 h-3.5 text-emerald-400" />
-              DERIV 24/7 AUTO-TRADING SYSTEM
-            </span>
-            <span
-              className={`px-3 py-1 rounded-full text-xs font-mono font-black flex items-center gap-1.5 ${
-                isRunning
-                  ? 'bg-emerald-500 text-slate-950 animate-pulse shadow-[0_0_15px_rgba(16,185,129,0.5)]'
-                  : 'bg-slate-800 text-slate-300 border border-slate-700'
-              }`}
-            >
-              <span className={`w-2 h-2 rounded-full ${isRunning ? 'bg-slate-950' : 'bg-amber-400'}`} />
-              {isRunning ? 'SYSTEM RUNNING 24/7 (NON-STOP)' : 'SYSTEM IDLE / READY'}
-            </span>
-            <span className="px-2.5 py-0.5 rounded-full bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 text-[11px] font-mono font-bold">
-              TP TARGET: ${tpTarget.toLocaleString()} USD
-            </span>
+      <div className="relative z-10 p-4 sm:p-6 space-y-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/50 bg-emerald-500/10 px-3 py-1 text-[11px] font-black uppercase tracking-wider text-emerald-300">
+                <Zap className="h-3.5 w-3.5" /> Deriv Auto-Matches System
+              </span>
+              <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-black uppercase tracking-wider ${isRunning ? 'bg-emerald-500 text-slate-950' : 'border border-slate-700 bg-slate-900 text-slate-300'}`}>
+                <span className={`h-2 w-2 rounded-full ${isRunning ? 'bg-slate-950 animate-pulse' : 'bg-amber-400'}`} />
+                {isRunning ? 'System running' : 'System ready'}
+              </span>
+            </div>
+            <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
+              Auto-Matches & Recovery Trading System
+            </h2>
+            <p className="max-w-3xl text-xs sm:text-sm leading-relaxed text-slate-300">
+              Live Deriv market data, account-backed order execution, Auto-Matches controls, recovery status, session performance, and the original system controls in one panel.
+            </p>
           </div>
 
-          <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white flex items-center gap-2">
-            Auto-Matches & Recovery Trading System
-          </h2>
-          <p className="text-xs sm:text-sm text-slate-300 max-w-3xl leading-relaxed">
-            Continuously executes high-probability Matches & Differs contracts on Deriv Volatility Indices.
-            Engineered to run continuously tick-after-tick until stopped by you or when reaching your $10,000 profit goal.
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onToggleRun(!isRunning)}
+              className={`inline-flex min-w-[185px] items-center justify-center gap-2 rounded-2xl px-6 py-3.5 text-sm font-black transition active:scale-95 ${isRunning ? 'bg-rose-500 text-white hover:bg-rose-400' : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400 shadow-lg shadow-emerald-500/20'}`}
+            >
+              {isRunning ? <Square className="h-4 w-4 fill-current" /> : <Play className="h-4 w-4 fill-current" />}
+              {isRunning ? 'STOP SYSTEM' : 'START SYSTEM'}
+            </button>
+            <button
+              type="button"
+              onClick={onOpenSafetyModal}
+              className="rounded-2xl border border-slate-700 bg-slate-900 p-3.5 text-slate-200 transition hover:border-emerald-500/50 hover:text-emerald-300"
+              title="Safety and profit-lock settings"
+            >
+              <Settings className="h-5 w-5" />
+            </button>
+          </div>
         </div>
 
-        {/* Primary START / STOP Large Action Button */}
-        <div className="flex items-center gap-3">
-          {isRunning ? (
-            <button
-              id="system-stop-btn"
-              type="button"
-              onClick={() => onToggleRun(false)}
-              className="w-full sm:w-auto px-7 py-4 rounded-2xl bg-rose-500 hover:bg-rose-600 active:scale-95 text-white font-black text-sm sm:text-base flex items-center justify-center gap-2.5 shadow-xl transition cursor-pointer border-2 border-rose-400"
-            >
-              <Square className="w-5 h-5 fill-white" />
-              <span>STOP SYSTEM NOW</span>
-            </button>
-          ) : (
-            <button
-              id="system-start-btn"
-              type="button"
-              onClick={() => onToggleRun(true)}
-              className="w-full sm:w-auto px-8 py-4 rounded-2xl bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-slate-950 font-black text-sm sm:text-base flex items-center justify-center gap-2.5 shadow-[0_0_25px_rgba(16,185,129,0.45)] hover:shadow-[0_0_35px_rgba(16,185,129,0.65)] transition cursor-pointer border-2 border-emerald-300"
-            >
-              <Play className="w-5 h-5 fill-slate-950" />
-              <span>START SYSTEM (RUN 24/7)</span>
-            </button>
-          )}
+        <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+            <div className="flex items-center gap-3">
+              <div className={`flex h-11 w-11 items-center justify-center rounded-xl border ${isRealAccount ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400' : isAuthorized ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-300' : 'border-rose-500/40 bg-rose-500/10 text-rose-300'}`}>
+                {isRealAccount ? <ShieldCheck className="h-5 w-5" /> : <Wallet className="h-5 w-5" />}
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2 text-xs font-mono font-bold">
+                  <span className="text-slate-400">ACCOUNT</span>
+                  <span className={isRealAccount ? 'text-emerald-300' : isAuthorized ? 'text-cyan-300' : 'text-rose-300'}>
+                    {isRealAccount ? `REAL LIVE ${accountInfo.loginId || ''}` : isAuthorized ? `DEMO ${accountInfo.loginId || ''}` : 'NOT AUTHORIZED'}
+                  </span>
+                </div>
+                <div className="mt-1 text-xs font-mono text-slate-400">
+                  Balance: <span className="font-bold text-white">{isAuthorized && accountInfo.balance !== undefined ? `${Number(accountInfo.balance).toFixed(2)} ${currency}` : 'â€”'}</span>
+                </div>
+              </div>
+            </div>
 
-          <button
-            type="button"
-            onClick={onOpenSafetyModal}
-            className="p-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 hover:border-emerald-500/50 transition cursor-pointer"
-            title="Configure System Targets & 24/7 Rules"
-          >
-            <Settings className="w-5 h-5 text-emerald-400" />
-          </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onOpenConnectModal}
+                className="inline-flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2.5 text-xs font-black text-slate-950 hover:bg-emerald-400"
+              >
+                <Lock className="h-3.5 w-3.5" /> {isAuthorized ? 'ACCOUNT SETTINGS' : 'CONNECT DERIV'}
+              </button>
+              <span className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-[11px] font-mono text-slate-400">
+                <Radio className={`h-3.5 w-3.5 ${isAuthorized ? 'text-emerald-400' : 'text-amber-400'}`} />
+                {isAuthorized ? 'Authorized execution' : 'Market data only'}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/75 p-4">
+            <div className="flex items-center justify-between text-[11px] font-mono font-bold uppercase text-slate-400">
+              <span>Profit target</span><Target className="h-4 w-4 text-cyan-400" />
+            </div>
+            <div className="mt-2 flex items-baseline gap-1 text-2xl font-black text-white">
+              {expectedProfit.toLocaleString()} <span className="text-xs font-medium text-slate-500">{currency}</span>
+            </div>
+            <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-800">
+              <div className="h-full bg-gradient-to-r from-cyan-500 to-emerald-400 transition-all" style={{ width: `${Math.max(2, progress)}%` }} />
+            </div>
+            <div className="mt-1.5 flex justify-between text-[10px] font-mono text-slate-500">
+              <span>Net {sessionStats.netProfit.toFixed(2)}</span><span>{progress.toFixed(1)}%</span>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/75 p-4">
+            <div className="flex items-center justify-between text-[11px] font-mono font-bold uppercase text-slate-400">
+              <span>Live market</span><Activity className="h-4 w-4 text-emerald-400" />
+            </div>
+            <div className="mt-2 text-xl font-black text-white">{currentSymbol}</div>
+            <div className="mt-1 text-xs font-mono text-slate-400">
+              {currentPrice > 0 ? currentPrice.toFixed(pip) : 'Waiting for tick'}
+            </div>
+            <div className="mt-2 flex items-center justify-between text-[11px] font-mono">
+              <span className="text-slate-500">Last digit <strong className="text-amber-300">{lastDigit}</strong></span>
+              <span className="text-slate-500">Target <strong className="text-emerald-300">{targetDigit ?? 'â€”'}</strong></span>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/75 p-4">
+            <div className="flex items-center justify-between text-[11px] font-mono font-bold uppercase text-slate-400">
+              <span>Session</span><Gauge className="h-4 w-4 text-emerald-400" />
+            </div>
+            <div className="mt-2 text-xl font-black text-white">{sessionStats.wins}W <span className="text-slate-600">/</span> {sessionStats.losses}L</div>
+            <div className="mt-1 text-xs font-mono text-emerald-300">{winRate.toFixed(1)}% settled wins</div>
+            <div className="mt-2 text-[11px] font-mono text-slate-500">Trades {sessionStats.totalTrades} â€¢ Pending {pendingCount}</div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/75 p-4">
+            <div className="flex items-center justify-between text-[11px] font-mono font-bold uppercase text-slate-400">
+              <span>Recovery status</span><ShieldCheck className="h-4 w-4 text-amber-400" />
+            </div>
+            <div className="mt-2 text-xl font-black text-white">{sessionStats.consecutiveLosses} loss streak</div>
+            <div className="mt-1 text-xs font-mono text-slate-400">Drawdown {sessionStats.cumulativeLoss.toFixed(2)} {currency}</div>
+            <div className="mt-2 text-[11px] font-mono text-slate-500">Matches wins {matchesWins}</div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1.2fr_1fr]">
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/65 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-xs font-black uppercase tracking-wider text-slate-300">Live system controls</div>
+              <CircleDollarSign className="h-4 w-4 text-emerald-400" />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="space-y-1 text-[11px] font-mono text-slate-400">
+                <span>Market</span>
+                <select
+                  value={currentSymbol}
+                  onChange={(event) => onSelectSymbol(event.target.value)}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-2.5 text-xs font-bold text-white outline-none focus:border-emerald-500"
+                >
+                  {symbols.map((item) => <option key={item.symbol} value={item.symbol}>{item.name}</option>)}
+                </select>
+              </label>
+              <label className="space-y-1 text-[11px] font-mono text-slate-400">
+                <span>Stake</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={stake}
+                  onChange={(event) => setStake(Math.max(0.01, Number(event.target.value) || 0.01))}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-2.5 text-xs font-bold text-white outline-none focus:border-emerald-500"
+                />
+              </label>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-mono">
+              <span className="text-slate-500">Quick stake</span>
+              {[0.35, 0.5, 1, 2, 5].map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setStake(value)}
+                  className={`rounded-lg border px-2.5 py-1.5 font-bold transition ${stake === value ? 'border-emerald-400 bg-emerald-500 text-slate-950' : 'border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-600'}`}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-800 bg-slate-950/65 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-xs font-black uppercase tracking-wider text-slate-300">Target & session</div>
+              <Target className="h-4 w-4 text-cyan-400" />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[20, 50, 100, 500, 1000].map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setTargetProfit(value)}
+                  className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-mono font-bold transition ${expectedProfit === value ? 'border-cyan-400 bg-cyan-500 text-slate-950' : 'border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-600'}`}
+                >
+                  TP {value}
+                </button>
+              ))}
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" onClick={onResetSession} className="inline-flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-[11px] font-bold text-slate-300 hover:text-white">
+                <RotateCcw className="h-3.5 w-3.5" /> Reset session
+              </button>
+              <button type="button" onClick={onOpenSafetyModal} className="inline-flex items-center gap-1.5 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-3 py-2 text-[11px] font-bold text-emerald-300 hover:bg-emerald-500/15">
+                <ShieldCheck className="h-3.5 w-3.5" /> Safety / profit lock
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4 text-[10px] font-mono text-slate-500">
+          <span className="inline-flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> Uses the existing live Deriv execution engine</span>
+          <span>Execution strategy code is not defined in this UI component.</span>
         </div>
       </div>
-
-      {/* Account Verification & 100% Real Live Connection Strip */}
-      <div className="mt-4 p4 rounded-2xl bg-slate-900/90 border border-slate-800 flex flex-col gap-4 relative z-h10">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div
-              className={`w-10 h-10 rounded-xl flex items-center justify-center border ${
-                isRealAccount
-                  ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-400'
-                : isAuthorized
-                  ? 'bg-cyan-500/20 border-cyan-500/50 text-cyan-300'
-                  : 'bg-rose-500/20 border-rose-500/50 text-rose-400'
-              }`}
-            >
-              {isRealAccount ? <ShieldCheck className="w-5 h-5 text-emerald-400" /> : <Key className="w-5 h-5" />}
-            </div>
-            <div>
-              <div className="text-xs font-mono font-bold flex items-center gap-2">
-                <span className="text-slate-400 uppercase tracking-wider">Trading Mode:</span>
-                <span
-                  className={`font-black ${
-                    isRealAccount
-                      ? 'text-emerald-400'
-                      : isAuthorized
-                      ? 'text-cyan-300'
-                      : 'text-rose-400'
-                  }`}
-                >
-                  {isRealAccount
-                    ? `ğŸŸ 100% REAL LIVE ACCOUNT (${accountInfo.loginId})`
-                    : isAuthorized
-                    ? `PRACTICE DEMO (${accountInfo.loginId})`
-                    : 'NO REAL ACCOUNT CONNECTED'}
-                </span>
-              </div>
-              <div className="text-xs text-slate-300 font-mono flex items-center gap-2 mt-0.5">
-                <span>
-                  Real Deriv Balance: {'}
-                  <strong className="text-white font-bold">
-                    {accountInfo.balance !== undefined ? `${accountInfo.balance.toFixed(2)} ${accountInfo.currency || 'USD'}` : 'â€•'}
-                  </strong>
-                </span>
-                <span>â€¢</span>
-                <span className="text-slate-400">
-                  {isRealAccount
-                    ? 'Connected directly to Deriv live matching engine'
-                    : 'Use the secure Deriv account selector to connect REAL or DEMO'}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            {isRealAccount ? (Bˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆØ\Lˆ‚ˆÜ[ˆÛ\ÜÓ˜[YOHœLÈKLKH›İ[™Y^™ËY[Y\˜[MLÌŒ›Ü™\ˆ›Ü™\‹Y[Y\˜[MLÍŒ^Y[Y\˜[LÌ^^È›Û[[Û›È›ÛX›Û›^][\ËXÙ[\ˆØ\LKH‚ˆÚXÚĞÚ\˜ÛLˆÛ\ÜÓ˜[YOHËLËHLËH^Y[Y\˜[MˆÏ‚ˆÜ[ŒL	H‘PSU‘H‘PQOÜÜ[‚ˆÜÜ[‚ˆ]Û‚ˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^Ú[™TİÚ]ÚÑ[[ßBˆÛ\ÜÓ˜[YOHœLÈKLKH›İ[™Y^™Ë\Û]KNİ™\˜™Ë\Û]KMÌ^\Û]KLÌ^^È›Û[[Û›È˜[œÚ][Ûˆİ\œÛÜ‹\Ú[\ˆ‚ˆ‚ˆİÚ]ÚÈ[[ÂˆØ]Û‚ˆÙ]‚ˆ
-Hˆ
-ˆ]Û‚ˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^Ú[™TİÚ]ÚÑ[[ßBˆÛ\ÜÓ˜[YOHœLÈKLKH›İ[™Y^™ËXŞX[‹NMLÍŒ›Ü™\ˆ›Ü™\‹XŞX[‹MLÍ^XŞX[‹LÌİ™\˜™ËXŞX[‹NLÍŒ^^È›Û[[Û›È˜[œÚ][Ûˆİ\œÛÜ‹\Ú[\ˆ‚ˆ‚ˆ\ÙH˜XİXÙH[[È
-	LÊBˆØ]Û‚ˆ
-_B‚ˆ]Û‚ˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^ÛÛ“Ü[ÛÛ›™Xİ[Ù[BˆÛ\ÜÓ˜[YOHœLÈKLKH›İ[™Y^™Ë\Û]KNİ™\˜™Ë\Û]KMÌ^\Û]KLÌ›Ü™\ˆ›Ü™\‹\Û]KMÌ^^È›Û[[Û›È˜[œÚ][Ûˆ›^][\ËXÙ[\ˆØ\LKHİ\œÛÜ‹\Ú[\ˆ‚ˆ‚ˆÙ][™ÜÈÛ\ÜÓ˜[YOHËLËHLËH^Y[Y\˜[MˆÏ‚ˆÜ[ÛÛ›™Xİ[ÛˆÙ][™ÜÏÜÜ[‚ˆØ]Û‚ˆÙ]‚ˆÙ]‚‚ˆËÊˆÙXİ\™H\š]ˆXØÛİ[Ù[XİÜˆÙY\ÈÜ™Y[X[Èİ]ÙˆHœ›İÜÙ\ˆRKˆ
-‹ßBˆÈZ\Ô™X[XØÛİ[	‰ˆ
-ˆ]ˆÛ\ÜÓ˜[YOHœLÈ›Ü™\‹]›Ü™\‹\Û]KNÎ›^›^XÛÛÛN™›^\›İÈØ\L‹H][\Ë\İ™]ÚÛNš][\ËXÙ[\ˆ‚ˆ]Û‚ˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^Ê
-HOˆÂˆÙ]ÚÙ[“›İXÙJ	ÓÜ[ˆHÙXİ\™H\š]ˆÙ[XİÜˆ[™ÚÛÜÙH‘PSÜˆSSË‰ÊNÂˆÛ“Ü[ÛÛ›™Xİ[Ù[
-
-NÂˆ_BˆÛ\ÜÓ˜[YOHœMHKL‹H›İ[™Y^™ËY[Y\˜[MLİ™\˜™ËY[Y\˜[M^\Û]KNML›ÛX›XÚÈ^^È›Û[[Û›È˜[œÚ][Ûˆ›^][\ËXÙ[\ˆ\İYKXÙ[\ˆØ\Lˆİ\œÛÜ‹\Ú[\ˆÚYİË[ÈÚYİËY[Y\˜[MLÌH‚ˆ‚ˆÚY[ÚXÚÈÛ\ÜÓ˜[YOHËMMˆÏ‚ˆÜ[ÓÓ“‘PÕT’Uˆ‘PSÈSSÏÜÜ[‚ˆØ]Û‚ˆÜ[ˆÛ\ÜÓ˜[YOH^VÌL\H^\Û]KM›Û[[Û›È”ÙXİ\™HXØÛİ[›İÈ8 %›ÈTHÚÙ[ˆ\ÈİÜ™Y[ˆ\È\Ú›Ø\™ÜÜ[‚ˆÙ]‚ˆ
-_BˆÙ]‚‚ˆİÚÙ[“›İXÙH	‰ˆ
-ˆ]ˆÛ\ÜÓ˜[YOH›]LˆL‹H›İ[™Y^™ËY[Y\˜[NMLÍŒ›Ü™\ˆ›Ü™\‹Y[Y\˜[MLÍ^YÈ›Û[[Û›È^Y[Y\˜[LÌ›^][\ËXÙ[\ˆØ\Lˆ‚ˆ˜\Û\ÜÓ˜[YOHËLËHLËH^Y[Y\˜[MÚš[šËLˆÏ‚ˆÜ[İÚÙ[“›İXÙ_OÜÜ[‚ˆÙ]‚ˆ
-_B‚ˆËÊˆZÙH›Ùš]	L\™Ù]›ÙÜ™\ÜÈ˜\ˆ	ˆ]™Hİ]ÈÜšY
-‹ßBˆ]ˆÛ\ÜÓ˜[YOH›]MHÜšYÜšYXÛÛËLHÛN™ÜšYXÛÛËLˆÎ™ÜšYXÛÛËMØ\LÈ™[]]™H‹LL‚ˆËÊˆY]šXÈNˆZÙH›Ùš]ÛØ[
-	L
-H
-‹ßBˆ]ˆÛ\ÜÓ˜[YOHœM›İ[™YL™Ë\Û]KNLÎ›Ü™\ˆ›Ü™\‹\Û]KNÜXÙK^KLˆ‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆ\İYKX™]ÙY[ˆ^^È^\Û]KM›Û[[Û›È‚ˆÜ[•RÑH“Ñ’UÓĞSÜÜ[‚ˆÜ[ˆÛ\ÜÓ˜[YOH^XŞX[‹M›ÛX›Ûİ›ÙÜ™\ÜÔİIOÜÜ[‚ˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^L›ÛX›XÚÈ^]Ú]H›Û[[Û›È›^][\ËX˜\Ù[[™HØ\LH‚ˆÜ[‰İ\™Ù]ÓØØ[Tİš[™Ê
-_OÜÜ[‚ˆÜ[ˆÛ\ÜÓ˜[YOH^^È^\Û]KM›Û[›Ü›X[•TÑÜÜ[‚ˆÙ]‚ˆËÊˆ›ÙÜ™\ÜÈ˜\ˆ
-‹ßBˆ]ˆÛ\ÜÓ˜[YOHËY[Lˆ›İ[™YY[™Ë\Û]KNİ™\™›İËZY[ˆ‚ˆ]‚ˆÛ\ÜÓ˜[YOHšY[™ËYÜ˜YY[]Ë\ˆœ›ÛKXŞX[‹MLËY[Y\˜[M˜[œÚ][Û‹X[\˜][Û‹ML‚ˆİ[O^ŞÈÚYˆ	ÓX]›X^
-‹›ÙÜ™\ÜÔİ
-_IX_BˆÏ‚ˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^VÌL\H^\Û]KM›Û[[Û›È›^\İYKX™]ÙY[ˆ‚ˆÜ[“™]ˆİ›Û™ÈÛ\ÜÓ˜[YO^Øİ\œ™[™]›Ùš]HÈ	İ^Y[Y\˜[M	Èˆ	İ^\›ÜÙKM	ßO‰Øİ\œ™[™]›Ùš]Ñš^Y
-Š_OÜİ›Û™ÏÜÜ[‚ˆÜ[•\™Ù]ˆ	İ\™Ù]ÓØØ[Tİš[™Ê
-_OÜÜ[‚ˆÙ]‚ˆÙ]‚‚ˆËÊˆY]šXÈˆİÜ[ÙH	ˆ[H
-‹ßBˆ]ˆÛ\ÜÓ˜[YOHœM›İ[™YL™Ë\Û]KNLÎ›Ü™\ˆ›Ü™\‹\Û]KNÜXÙK^KLˆ‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆ\İYKX™]ÙY[ˆ^^È^\Û]KM›Û[[Û›È‚ˆÜ[”ÖTÕSH•SˆSÑOÜÜ[‚ˆÚY[ÚXÚÈÛ\ÜÓ˜[YOHËLËHLËH^Y[Y\˜[MˆÏ‚ˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^X˜\ÙH›ÛX›XÚÈ^Y[Y\˜[LÌ›Û[[Û›ÈXY[™Ë]YÚ‚ˆÚ\ÌÓ›Û”İÜÈ	ÌÍÈ“Ó‹TÕÔ	Èˆ	ÔĞQ‘UH“ÕS‘Q	ßBˆÙ]‚ˆÛ\ÜÓ˜[YOH^VÌL\H^\Û]KM›Û[[Û›ÈXY[™Ë]YÚ‚ˆÚ[›İİÜÛˆÜÜÙ\Ëˆ[œÈÛÛ[[İ\ÛH[[X[X[ÕÔÜˆ	L‚ˆÜ‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆØ\LKHLH‚ˆÜ[ˆÛ\ÜÓ˜[YOHËLˆLˆ›İ[™YY[™ËY[Y\˜[M[š[X]K\[™ÈˆÏ‚ˆÜ[ˆÛ\ÜÓ˜[YOH^VÌLH^Y[Y\˜[M›Û[[Û›È›ÛX›Û\\˜Ø\ÙHÛÛ[[İ\ÈÛÜXİ]™OÜÜ[‚ˆÙ]‚ˆÙ]‚‚ˆËÊˆY]šXÈÎˆ]™HX\šÙ]	ˆ\™Ù]YÚ]
-‹ßBˆ]ˆÛ\ÜÓ˜[YOHœM›İ[™YL™Ë\Û]KNLÎ›Ü™\ˆ›Ü™\‹\Û]KNÜXÙK^KLˆ‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆ\İYKX™]ÙY[ˆ^^È^\Û]KM›Û[[Û›È‚ˆÜ[PÕU‘HPT’ÑU	ˆQÒUÜÜ[‚ˆ\™Ù]Û\ÜÓ˜[YOHËLËHLËH^X[X™\‹MˆÏ‚ˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆ\İYKX™]ÙY[ˆ‚ˆ]‚ˆ]ˆÛ\ÜÓ˜[YOH^X˜\ÙH›ÛX›XÚÈ^]Ú]H›Û[[Û›ÈØİ\œ™[Ş[X›ÛOÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^^È^\Û]KM›Û[[Û›È‚ˆ][İNˆÜ[ˆÛ\ÜÓ˜[YOH^\Û]KLŒØİ\œ™[šXÙHˆÈİ\œ™[šXÙKÑš^Y
-\
-Hˆ	ø %	ßOÜÜ[‚ˆÙ]‚ˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^\šYÚ‚ˆ]ˆÛ\ÜÓ˜[YOH^VÌLH^\Û]KM›Û[[Û›È•T‘ÑUQÒUÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^L›ÛX›XÚÈ^X[X™\‹M›Û[[Û›È™ËX[X™\‹MÌLL‹HKLH›İ[™Y[È›Ü™\ˆ›Ü™\‹X[X™\‹MÌÌ‚ˆİ\™Ù]YÚ]OOH[™Yš[™YÈ\™Ù]YÚ]ˆ\İYÚ]BˆÙ]‚ˆÙ]‚ˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^VÌL\H^\Û]KM›Û[[Û›È›^][\ËXÙ[\ˆ\İYKX™]ÙY[ˆ‚ˆÜ[“\İYÚ]ˆİ›Û™ÈÛ\ÜÓ˜[YOH^X[X™\‹LÌ›Û[[Û›È^^ÈÛ\İYÚ]OÜİ›Û™ÏÜÜ[‚ˆÜ[ˆÛ\ÜÓ˜[YOH^Y[Y\˜[M›ÛX›Û“X]Ú\ËÑY™™\œÏÜÜ[‚ˆÙ]‚ˆÙ]‚‚ˆËÊˆY]šXÈˆÙ\ÜÚ[Ûˆ^Xİ][Ûˆ™XÛÜ™
-‹ßBˆ]ˆÛ\ÜÓ˜[YOHœM›İ[™YL™Ë\Û]KNLÎ›Ü™\ˆ›Ü™\‹\Û]KNÜXÙK^KLˆ‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆ\İYKX™]ÙY[ˆ^^È^\Û]KM›Û[[Û›È‚ˆÜ[”ÑTÔÒSÓˆT‘“Ô“PSÑOÜÜ[‚ˆ]Û‚ˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^ÛÛ”™\Ù]Ù\ÜÚ[ÛŸBˆÛ\ÜÓ˜[YOH^\Û]KMLİ™\^\Û]KLÌ˜[œÚ][Ûˆİ\œÛÜ‹\Ú[\ˆLH‚ˆ]OH”™\Ù]Ù\ÜÚ[Ûˆİ]È‚ˆ‚ˆ›İ]PØİÈÛ\ÜÓ˜[YOHËLËHLËHˆÏ‚ˆØ]Û‚ˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËX˜\Ù[[™H\İYKX™]ÙY[ˆ‚ˆ]ˆÛ\ÜÓ˜[YOH^^›ÛX›XÚÈ^]Ú]H›Û[[Û›È‚ˆÜÙ\ÜÚ[Û”İ]ËÚ[œßUÈÜ[ˆÛ\ÜÓ˜[YOH^\Û]KML‹ÏÜÜ[ˆÜÙ\ÜÚ[Û”İ]Ë›ÜÜÙ\ßSˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^^È›Û[[Û›È›ÛX›Û^Y[Y\˜[M‚ˆİÚ[”˜]_IHÚ[‚ˆÙ]‚ˆÙ]‚ˆ]ˆÛ\ÜÓ˜[YOH^VÌL\H^\Û]KM›Û[[Û›È›^\İYKX™]ÙY[ˆ‚ˆÜ[•˜Y\Îˆİ›Û™ÏÜÙ\ÜÚ[Û”İ]Ëİ[˜Y\ßOÜİ›Û™ÏÜÜ[‚ˆÜ[”İ™XZÎˆİ›Û™ÈÛ\ÜÓ˜[YOH^]Ú]HÜÙ\ÜÚ[Û”İ]Ë˜ÛÛœÙXİ]]™SÜÜÙ\ßHÜÜÏÜİ›Û™ÏÜÜ[‚ˆÙ]‚ˆØİ\œ™[™]›Ùš]ˆ	‰ˆÛ•˜][ÛÛ”›Ùš]	‰ˆ
-ˆ]Û‚ˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^ÛÛ•˜][ÛÛ”›Ùš]BˆÛ\ÜÓ˜[YOHËY[]LHKLH›İ[™Y™ËY[Y\˜[MLÌŒİ™\˜™ËY[Y\˜[MLÌÌ^Y[Y\˜[LÌ^VÌLH›Û[[Û›È›ÛX›Û›Ü™\ˆ›Ü™\‹Y[Y\˜[MLÍ›^][\ËXÙ[\ˆ\İYKXÙ[\ˆØ\LHİ\œÛÜ‹\Ú[\ˆ˜[œÚ][Ûˆ‚ˆ‚ˆØÚÈÛ\ÜÓ˜[YOHËL‹HL‹H^Y[Y\˜[MˆÏ‚ˆÜ[•˜][›Ùš]
-
-ÉØİ\œ™[™]›Ùš]Ñš^Y
-Š_JOÜÜ[‚ˆØ]Û‚ˆ
-_BˆÙ]‚ˆÙ]‚‚ˆËÊˆ]ZXÚÈÙ][™ÜÈ	ˆ™\Ù]˜\œÈ
-‹ßBˆ]ˆÛ\ÜÓ˜[YOH›]MM›Ü™\‹]›Ü™\‹\Û]KNÎ›^›^]Ü˜\][\ËXÙ[\ˆ\İYKX™]ÙY[ˆØ\LÈ^^È›Û[[Û›È^\Û]KLÌ‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆØ\LÈ›^]Ü˜\‚ˆÜ[ˆÛ\ÜÓ˜[YOH^\Û]KM”]ZXÚÈİZÙNÜÜ[‚ˆÖÌŒÍKKK‹WK›X\
-
-˜[
-HOˆ
-ˆ]Û‚ˆÙ^O^İ˜[Bˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^Ê
-HOˆ[™T]ZXÚÔİZÙPÚ[™ÙJ˜[
-_BˆÛ\ÜÓ˜[YO^ØL‹HKLH›İ[™Y[È›Ü™\ˆİ\œÛÜ‹\Ú[\ˆ˜[œÚ][Ûˆ	Âˆ
-ÛÛ™šYËœİZÙHŒÍJHOOH˜[ˆÈ	Ø™ËY[Y\˜[ML^\Û]KNML›ÛX›Û›Ü™\‹Y[Y\˜[M	Âˆˆ	Ø™Ë\Û]KNLİ™\˜™Ë\Û]KN^\Û]KLÌ›Ü™\‹\Û]KMÌ	ÂˆXBˆ‚ˆ	İ˜[BˆØ]Û‚ˆ
-J_B‚ˆÜ[ˆÛ\ÜÓ˜[YOH^\Û]KM[Lˆ”]ZXÚÈÜÜ[‚ˆÖÌLLLŒK›X\
-
-˜[
-HOˆ
-ˆ]Û‚ˆÙ^O^İ˜[Bˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^Ê
-HOˆ[™T]ZXÚÕÚ[™ÙJ˜[
-_BˆÛ\ÜÓ˜[YO^ØL‹HKLH›İ[™Y[È›Ü™\ˆİ\œÛÜ‹\Ú[\ˆ˜[œÚ][Ûˆ	Âˆ\™Ù]OOH˜[ˆÈ	Ø™ËXŞX[‹ML^\Û]KNML›ÛX›Û›Ü™\‹XŞX[‹M	Âˆˆ	Ø™Ë\Û]KNLİ™\˜™Ë\Û]KN^\Û]KLÌ›Ü™\‹\Û]KMÌ	ÂˆXBˆ‚ˆ	İ˜[ÓØØ[Tİš[™Ê
-_BˆØ]Û‚ˆ
-J_BˆÙ]‚‚ˆ]ˆÛ\ÜÓ˜[YOH™›^][\ËXÙ[\ˆØ\Lˆ‚ˆ]Û‚ˆ\OH˜]Ûˆ‚ˆÛÛXÚÏ^ÛÛ“Ü[”ØY™]S[Ù[BˆÛ\ÜÓ˜[YOH^Y[Y\˜[Mİ™\[™\›[™H›^][\ËXÙ[\ˆØ\LH^^Èİ\œÛÜ‹\Ú[\ˆ›ÛX›Û‚ˆ‚ˆÜ[Y˜[˜ÙYØY™]H	ˆX\[™Ø[HÙ][™ÜÏÜÜ[‚ˆ\œ›İÔšYÚÛ\ÜÓ˜[YOHËLÈLÈˆÏ‚ˆØ]Û‚ˆÙ]‚ˆÙ]‚ˆÜÙXİ[Û‚ˆ
-NÂŸNÂ
+    </section>
+  );
+};
