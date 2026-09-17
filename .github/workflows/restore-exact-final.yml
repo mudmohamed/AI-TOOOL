@@ -24,8 +24,11 @@ jobs:
           xz -dc /tmp/restore.patch.xz > /tmp/restore.patch
 
           git fetch origin '+refs/heads/*:refs/remotes/origin/*'
-          APP_BASE=$(awk '/^diff --git a\/src\/App.tsx b\/src\/App.tsx/{f=1;next} f && /^index /{split($2,a,"..") ; print a[1]; exit}' /tmp/restore.patch)
+          INDEX_PAIR=$(sed -n '/^diff --git a\/src\/App.tsx b\/src\/App.tsx/,/^diff --git /{ /^index /{p;q;} }' /tmp/restore.patch | awk '{print $2}')
+          APP_BASE=$(printf '%s' "$INDEX_PAIR" | sed -E 's/^([0-9a-f]+)\.\.([0-9a-f]+)$/\1/')
+          echo "Patch App pair: $INDEX_PAIR"
           echo "Patch App preimage: $APP_BASE"
+          test -n "$APP_BASE"
           BASE=''
           for c in $(git rev-list --all -- src/App.tsx); do
             blob=$(git ls-tree "$c" -- src/App.tsx | awk '{print $3}')
