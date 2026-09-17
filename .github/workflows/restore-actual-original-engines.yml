@@ -30,7 +30,8 @@ jobs:
           rm -rf /tmp/original-src .restore
           mkdir -p /tmp/original-src
           git checkout origin/full-system-restore-20260915 -- .restore
-          cat .restore/full_restore_payload.b64.part00 .restore/full_restore_payload.b64.part01 | base64 -d > /tmp/original.tar.gz
+          base64 -d .restore/full_restore_payload.b64.part00 > /tmp/original.tar.gz
+          base64 -d .restore/full_restore_payload.b64.part01 >> /tmp/original.tar.gz
           tar -xzf /tmp/original.tar.gz -C /tmp/original-src
           ORIGINAL_APP=$(find /tmp/original-src -type f -path '*/src/App.tsx' -print -quit)
           test -n "$ORIGINAL_APP"
