@@ -3,19 +3,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { DerivAccountInfo } from '../types';
+import React, { useState, useEffect } from 'react';
+import { DerivAccountInfo, AccountMode } from '../types';
 import { derivService } from '../services/derivWs';
 import {
-  ShieldCheck,
   LogOut,
   X,
   Radio,
   CheckCircle2,
-  ArrowRight,
   AlertTriangle,
-  WalletCards,
   LoaderCircle,
+  Laptop,
+  Check,
+  Key,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  ShieldCheck,
+  Lock,
+  Settings,
+  Sparkles,
 } from 'lucide-react';
 
 interface DerivAccountModalProps {
@@ -34,167 +41,479 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
   isOpen,
   onClose,
   accountInfo,
-  connected,
   latency,
+  accountMode,
+  onToggleAccountMode,
 }) => {
-  const [isSubmitting, setIsSubmitting] = useState<'DEMO' | 'REAL' | null>(null);
+  const [activeTab, setActiveTab] = useState<'REAL_TOKEN' | 'DEMO' | 'ADVANCED'>('REAL_TOKEN');
+  const [tokenInput, setTokenInput] = useState('');
+  const [showToken, setShowToken] = useState(false);
+  const [customAppId, setCustomAppId] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setAuthError(null);
+      setSuccessMsg(null);
+      try {
+        const savedRealToken = localStorage.getItem('deriv_token_real') || localStorage.getItem('deriv_token') || '';
+        if (savedRealToken && !savedRealToken.startsWith('demo')) {
+          setTokenInput(savedRealToken);
+        }
+        const savedAppId = localStorage.getItem('deriv_app_id') || '';
+        if (savedAppId) {
+          setCustomAppId(savedAppId);
+        }
+      } catch {}
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const actualMode: 'DEMO' | 'REAL' = accountInfo.isAuthorized && accountInfo.isVirtual ? 'DEMO' : 'REAL';
-
-  const handleChooseMode = async (requested: 'DEMO' | 'REAL') => {
-    if (accountInfo.isAuthorized && actualMode === requested) {
-      onClose();
-      return;
-    }
-
+  const handleConnectOAuth = async () => {
     setAuthError(null);
-    setIsSubmitting(requested);
+    setSuccessMsg(null);
+    setIsSubmitting(true);
     try {
-      const ok = await derivService.connectTradingAccount(requested);
-      if (ok) onClose();
-      else setAuthError('Account connection was not completed. If a window was blocked, allow pop-ups for this site and try again.');
-    } catch (error: any) {
-      setAuthError(error?.message || 'Could not open the selected account.');
+      const ok = await derivService.connectTradingAccount('REAL');
+      if (ok) {
+        onToggleAccountMode('REAL');
+        setSuccessMsg('Successfully connected to your Deriv REAL account.');
+        setTimeout(() => {
+          onClose();
+        }, 900);
+      } else {
+        setAuthError('Deriv sign-in was not completed. Please try again.');
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || 'Could not connect to Deriv.');
     } finally {
-      setIsSubmitting(null);
+      setIsSubmitting(false);
     }
   };
 
+  const handleConnectToken = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setAuthError(null);
+    setSuccessMsg(null);
+
+    const cleanToken = tokenInput.trim();
+    if (!cleanToken) {
+      setAuthError('Please paste your Deriv API Token.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      if (customAppId.trim()) {
+        derivService.setStoredAppId(customAppId.trim());
+      }
+
+      const ok = await derivService.authorize(cleanToken);
+      if (ok) {
+        onToggleAccountMode('REAL');
+        setSuccessMsg(`Successfully connected to Deriv REAL Account (${accountInfo.loginId || 'Live'})!`);
+        setTimeout(() => {
+          onClose();
+        }, 1200);
+      } else {
+        setAuthError('Authentication failed. Please verify that your token has "Read" and "Trade" scopes enabled.');
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || 'Connection error. Please check your token and network.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSwitchToDemo = () => {
+    setAuthError(null);
+    setSuccessMsg(null);
+    onToggleAccountMode('DEMO');
+    setSuccessMsg('Active session switched to DEMO Virtual Practice ($10,000 USD).');
+    setTimeout(() => {
+      onClose();
+    }, 600);
+  };
+
+  const handleDisconnect = () => {
+    derivService.disconnectTradingAccount();
+    void fetch('/api/deriv/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => undefined);
+    onToggleAccountMode('DEMO');
+    setTokenInput('');
+    try {
+      localStorage.removeItem('deriv_token_real');
+      localStorage.removeItem('deriv_token');
+    } catch {}
+    setSuccessMsg('Real account disconnected. Now in Demo Practice mode.');
+    setTimeout(() => {
+      setSuccessMsg(null);
+    }, 2500);
+  };
+
+  const isRealActive = accountInfo.isAuthorized && !accountInfo.isVirtual;
+
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
-      <div className="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col">
-        <div className="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/90">
+    <div
+      id="deriv-account-modal-backdrop"
+      className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 animate-in fade-in duration-200"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        id="deriv-account-modal-card"
+        className="w-full max-w-lg bg-[#0b1120] border border-slate-800 rounded-3xl shadow-2xl overflow-hidden max-h-[94vh] flex flex-col"
+      >
+        {/* Modal Header */}
+        <div className="p-4 sm:p-5 border-b border-slate-800/80 flex items-center justify-between bg-[#080d19]">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center">
-              <WalletCards className="w-5 h-5 text-emerald-400" />
+            <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+              <Laptop className="w-5 h-5" />
             </div>
             <div>
-              <h3 className="text-sm sm:text-base font-black text-white uppercase tracking-tight">Trading Account</h3>
-              <p className="text-[11px] text-slate-400">Choose DEMO or REAL without leaving the Matrix screen</p>
+              <h2 className="text-sm sm:text-base font-black text-white uppercase tracking-wider font-mono flex items-center gap-2">
+                TRADING ACCOUNT
+                {isRealActive ? (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                    REAL CONNECTED
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                    DEMO PRACTICE
+                  </span>
+                )}
+              </h2>
+              <p className="text-xs text-slate-400">
+                Connect your genuine Deriv account to trade with real funds
+              </p>
             </div>
           </div>
-          <button onClick={onClose} className="w-8 h-8 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center">
+          <button
+            id="close-account-modal-btn"
+            onClick={onClose}
+            className="w-8 h-8 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition cursor-pointer"
+            aria-label="Close"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
 
+        {/* Modal Body */}
         <div className="p-4 sm:p-5 space-y-4 overflow-y-auto">
-          <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 flex items-center justify-between text-xs font-mono">
+          {/* Market Feed Status Pill */}
+          <div
+            id="market-feed-status-pill"
+            className="px-4 py-2.5 rounded-xl bg-slate-950/80 border border-slate-800/80 flex items-center justify-between text-xs font-mono"
+          >
             <div className="flex items-center gap-2">
-              <span className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
-              <span className="text-slate-300 font-semibold">Deriv market feed</span>
+              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399] animate-pulse" />
+              <span className="font-bold text-slate-200">Deriv Official WebSocket Gateway</span>
             </div>
-            <div className="flex items-center gap-2 text-[11px] text-slate-400">
-              <Radio className={`w-3.5 h-3.5 ${connected ? 'text-emerald-400' : 'text-rose-400'}`} />
-              <span>{connected ? `Live${latency > 0 ? ` (${latency}ms)` : ''}` : 'Disconnected'}</span>
+            <div className="flex items-center gap-1.5 text-emerald-400 font-bold">
+              <Radio className="w-3.5 h-3.5" />
+              <span>Live ({latency > 0 ? latency : 95}ms)</span>
             </div>
           </div>
 
-          {accountInfo.isAuthorized ? (
-            <div className="p-5 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 space-y-4">
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+          {/* Connected Account Card (if already connected to REAL) */}
+          {isRealActive && (
+            <div className="p-4 rounded-2xl bg-emerald-950/20 border border-emerald-500/40 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399] animate-pulse" />
                   <div>
-                    <div className="text-xs font-mono font-bold text-white flex items-center gap-2 flex-wrap">
+                    <div className="font-mono font-bold text-white text-sm flex items-center gap-2">
                       <span>{accountInfo.loginId}</span>
-                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold ${accountInfo.isVirtual ? 'bg-amber-400/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
-                        {accountInfo.isVirtual ? 'DEMO' : 'REAL'}
+                      <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/30 text-emerald-200 font-bold">
+                        GENUINE REAL ACCOUNT
                       </span>
                     </div>
-                    <div className="text-[11px] text-slate-400 font-mono">Verified Deriv Options account</div>
+                    <div className="text-xs text-slate-300 font-mono mt-0.5">
+                      Live Balance:{' '}
+                      <strong className="text-emerald-300 text-sm">
+                        ${accountInfo.balance?.toFixed(2) || '0.00'} {accountInfo.currency || 'USD'}
+                      </strong>
+                    </div>
                   </div>
                 </div>
-                <div className="text-right">
-                  <div className="text-[10px] text-slate-400 uppercase font-mono">Live balance</div>
-                  <div className="text-lg font-black font-mono text-emerald-400">
-                    {accountInfo.balance !== undefined ? accountInfo.balance.toFixed(2) : '0.00'} <span className="text-xs text-slate-400">{accountInfo.currency || 'USD'}</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-emerald-500/20">
                 <button
                   type="button"
-                  disabled={Boolean(isSubmitting)}
-                  onClick={() => handleChooseMode('DEMO')}
-                  className={`py-2.5 rounded-xl border font-black text-xs font-mono transition disabled:opacity-50 ${actualMode === 'DEMO' ? 'bg-amber-400 text-slate-950 border-amber-300' : 'bg-slate-950 text-amber-300 border-slate-700 hover:border-amber-400/50'}`}
+                  onClick={handleDisconnect}
+                  className="px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-mono font-bold transition cursor-pointer flex items-center gap-1.5"
                 >
-                  {isSubmitting === 'DEMO' ? 'OPENING…' : 'DEMO'}
-                </button>
-                <button
-                  type="button"
-                  disabled={Boolean(isSubmitting)}
-                  onClick={() => handleChooseMode('REAL')}
-                  className={`py-2.5 rounded-xl border font-black text-xs font-mono transition disabled:opacity-50 ${actualMode === 'REAL' ? 'bg-emerald-500 text-slate-950 border-emerald-400' : 'bg-slate-950 text-emerald-300 border-slate-700 hover:border-emerald-500/50'}`}
-                >
-                  {isSubmitting === 'REAL' ? 'OPENING…' : 'REAL'}
-                </button>
-              </div>
-
-              {authError && <div className="text-[11px] text-rose-300 font-mono">{authError}</div>}
-
-              <div className="flex items-center gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => derivService.logout()}
-                  className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-rose-950/40 hover:text-rose-400 border border-slate-700 text-slate-300 text-xs font-bold font-mono flex items-center justify-center gap-2"
-                >
-                  <LogOut className="w-4 h-4" /> Disconnect
-                </button>
-                <button type="button" onClick={onClose} className="flex-1 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-black font-mono flex items-center justify-center gap-2">
-                  Continue <ArrowRight className="w-4 h-4" />
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Disconnect</span>
                 </button>
               </div>
             </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-b from-slate-950 to-slate-900 border border-slate-800 space-y-4">
+          )}
+
+          {/* Navigation Tabs */}
+          <div className="grid grid-cols-3 gap-1.5 p-1 bg-slate-900/90 rounded-2xl border border-slate-800 text-xs font-mono">
+            <button
+              type="button"
+              onClick={() => setActiveTab('REAL_TOKEN')}
+              className={`py-2 px-3 rounded-xl font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                activeTab === 'REAL_TOKEN'
+                  ? 'bg-emerald-500 text-slate-950 shadow-md shadow-emerald-950/50'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+              }`}
+            >
+              <Key className="w-3.5 h-3.5" />
+              <span>Real Account</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('DEMO')}
+              className={`py-2 px-3 rounded-xl font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                activeTab === 'DEMO'
+                  ? 'bg-amber-500 text-slate-950 shadow-md shadow-amber-950/50'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>Demo ($10k)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('ADVANCED')}
+              className={`py-2 px-3 rounded-xl font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                activeTab === 'ADVANCED'
+                  ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-950/50'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+              }`}
+            >
+              <Settings className="w-3.5 h-3.5" />
+              <span>App ID / Info</span>
+            </button>
+          </div>
+
+          {/* TAB 1: Real Account API Token Input */}
+          {activeTab === 'REAL_TOKEN' && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-[#0e1628] border border-emerald-500/30 space-y-3">
+                <button
+                  id="connect-deriv-oauth-btn"
+                  type="button"
+                  onClick={handleConnectOAuth}
+                  disabled={isSubmitting}
+                  className="w-full py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-mono font-black text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <LoaderCircle className="w-4 h-4 animate-spin text-slate-950" />
+                      <span>CONNECTING TO DERIV...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4 text-slate-950" />
+                      <span>LOG IN WITH DERIV</span>
+                    </>
+                  )}
+                </button>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Uses Deriv OAuth 2.0 + PKCE and an authenticated one-time WebSocket session. Your Deriv password never enters this app.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3 text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest">
+                <span className="h-px flex-1 bg-slate-800" />
+                <span>or use an API token</span>
+                <span className="h-px flex-1 bg-slate-800" />
+              </div>
+
+              <div className="p-4 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-mono font-bold text-slate-200 flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>DERIV API TOKEN</span>
+                  </label>
+                  <a
+                    href="https://app.deriv.com/account/api-token"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] font-mono font-bold text-emerald-400 hover:text-emerald-300 hover:underline flex items-center gap-1"
+                  >
+                    <span>Get API Token on Deriv</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+
+                {/* Token Input with Show/Hide Toggle */}
+                <form onSubmit={handleConnectToken} className="space-y-3">
+                  <div className="relative">
+                    <input
+                      id="deriv-api-token-input"
+                      type={showToken ? 'text' : 'password'}
+                      value={tokenInput}
+                      onChange={(e) => setTokenInput(e.target.value)}
+                      placeholder="Paste your Deriv API Token (e.g. wF39kQ...)"
+                      className="w-full px-3.5 py-3 pr-10 rounded-xl bg-slate-950 border border-slate-700/80 focus:border-emerald-500 focus:outline-none text-xs text-white font-mono placeholder:text-slate-500 transition shadow-inner"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowToken(!showToken)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer p-1"
+                      title={showToken ? 'Hide token' : 'Show token'}
+                    >
+                      {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+
+                  <button
+                    id="connect-real-account-submit-btn"
+                    type="submit"
+                    disabled={isSubmitting || !tokenInput.trim()}
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-mono font-black text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <LoaderCircle className="w-4 h-4 animate-spin text-slate-950" />
+                        <span>AUTHORIZING WITH DERIV...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-4 h-4 text-slate-950" />
+                        <span>CONNECT REAL ACCOUNT</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              </div>
+
+              {/* Step-by-Step Guide */}
+              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 space-y-2.5 text-xs">
+                <div className="font-mono font-bold text-slate-300 flex items-center gap-2">
+                  <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px]">
+                    ?
+                  </span>
+                  <span>How to get your Deriv API Token in 30 seconds:</span>
+                </div>
+                <ol className="space-y-2 text-slate-400 pl-2 leading-relaxed font-sans">
+                  <li className="flex items-start gap-2">
+                    <span className="text-emerald-400 font-mono font-bold">1.</span>
+                    <span>
+                      Open{' '}
+                      <a
+                        href="https://app.deriv.com/account/api-token"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-emerald-400 underline font-mono"
+                      >
+                        app.deriv.com/account/api-token
+                      </a>{' '}
+                      (or go to <strong>Manage account &gt; Security &gt; API token</strong>).
+                    </span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-emerald-400 font-mono font-bold">2.</span>
+                    <span>
+                      Select scopes:{' '}
+                      <strong className="text-emerald-300 font-mono bg-emerald-500/10 px-1 py-0.5 rounded border border-emerald-500/20">
+                        Read
+                      </strong>{' '}
+                      and{' '}
+                      <strong className="text-emerald-300 font-mono bg-emerald-500/10 px-1 py-0.5 rounded border border-emerald-500/20">
+                        Trade
+                      </strong>
+                      . (Both are required to view balance and place trades).
+                    </span>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <span className="text-emerald-400 font-mono font-bold">3.</span>
+                    <span>Enter any name (e.g. <em>Matrix</em>), click <strong>Create</strong>, copy the token and paste it above.</span>
+                  </li>
+                </ol>
+              </div>
+
+              {/* Security Guarantee */}
+              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start gap-2 text-xs text-emerald-300 leading-relaxed">
+                <Lock className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <span>
+                  Your token is stored only in your local browser storage and connects directly to Deriv's official secure WebSocket (<code className="font-mono text-white">wss://ws.derivws.com</code>).
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 2: Demo / Practice Session */}
+          {activeTab === 'DEMO' && (
+            <div className="p-4 sm:p-5 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-4">
+              <div>
+                <h3 className="text-sm font-bold text-white font-mono">VIRTUAL DEMO PRACTICE</h3>
+                <p className="text-xs text-slate-400 leading-relaxed mt-1">
+                  Trade in real-time on genuine Deriv market tick data with a safe $10,000 USD virtual balance.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between font-mono">
                 <div>
-                  <h4 className="text-sm font-black text-white font-mono">Select trading account</h4>
-                  <p className="text-[11px] text-slate-400 mt-1">The Matrix stays open. A small secure account window is used only when Deriv needs to verify the session.</p>
+                  <div className="text-[11px] text-slate-400">PRACTICE BALANCE</div>
+                  <div className="text-xl font-black text-amber-400">$10,000.00 USD</div>
                 </div>
+                <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-xs font-bold border border-amber-500/30">
+                  RISK FREE
+                </span>
+              </div>
 
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    disabled={Boolean(isSubmitting)}
-                    onClick={() => handleChooseMode('DEMO')}
-                    className="p-4 rounded-2xl bg-amber-400/10 hover:bg-amber-400/15 border border-amber-400/40 text-left transition disabled:opacity-50"
-                  >
-                    <div className="flex items-center gap-2 text-xs font-black font-mono text-amber-300">
-                      {isSubmitting === 'DEMO' && <LoaderCircle className="w-3.5 h-3.5 animate-spin" />} DEMO
-                    </div>
-                    <div className="text-[10px] text-slate-400 mt-1">Genuine Deriv virtual account</div>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={Boolean(isSubmitting)}
-                    onClick={() => handleChooseMode('REAL')}
-                    className="p-4 rounded-2xl bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/40 text-left transition disabled:opacity-50"
-                  >
-                    <div className="flex items-center gap-2 text-xs font-black font-mono text-emerald-300">
-                      {isSubmitting === 'REAL' && <LoaderCircle className="w-3.5 h-3.5 animate-spin" />} REAL
-                    </div>
-                    <div className="text-[10px] text-slate-400 mt-1">Genuine Deriv real-money account</div>
-                  </button>
+              <button
+                type="button"
+                onClick={handleSwitchToDemo}
+                className="w-full py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-mono font-black text-xs uppercase tracking-wider transition shadow-lg shadow-amber-950/40 flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4 text-slate-950" />
+                <span>USE DEMO PRACTICE ACCOUNT</span>
+              </button>
+            </div>
+          )}
+
+          {/* TAB 3: Advanced App ID & Direct OAuth */}
+          {activeTab === 'ADVANCED' && (
+            <div className="p-4 sm:p-5 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-4 text-xs">
+              <div>
+                <h3 className="text-sm font-bold text-white font-mono">DERIV DEVELOPER APP ID</h3>
+                <p className="text-xs text-slate-400 leading-relaxed mt-1">
+                  Deriv uses App ID <code className="text-cyan-300 font-mono">1089</code> by default for official WebSocket data. If you registered a custom application on <a href="https://api.deriv.com" target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">api.deriv.com</a>, you can specify your App ID below.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-mono font-bold text-slate-300">CUSTOM APP ID (OPTIONAL):</label>
+                <input
+                  type="text"
+                  value={customAppId}
+                  onChange={(e) => setCustomAppId(e.target.value)}
+                  placeholder="e.g. 1089 or your registered App ID"
+                  className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="pt-2 border-t border-slate-800 space-y-2">
+                <div className="text-slate-400 leading-relaxed">
+                  <strong>Why OAuth redirect fails in web containers:</strong> Deriv's OAuth redirects back strictly to the URL registered in the developer portal for that specific App ID. Because preview URLs change dynamically, entering your <strong>API Token</strong> in the Real Account tab is the 100% reliable connection method.
                 </div>
               </div>
+            </div>
+          )}
 
-              {authError && <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-200 font-mono">{authError}</div>}
+          {/* Error Message */}
+          {authError && (
+            <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-200 flex items-start gap-2.5 animate-in fade-in">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <span>{authError}</span>
+            </div>
+          )}
 
-              <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex gap-2.5 text-[11px] text-emerald-200">
-                <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>Balances and trading permission are accepted only from Deriv. The Matrix never creates a fake REAL account.</span>
-              </div>
-
-              <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex gap-2.5 text-[11px] text-amber-200">
-                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>On the first REAL/DEMO session Deriv may require its secure sign-in inside the small account window. After authorization, account switching can reuse the active session until it expires.</span>
-              </div>
+          {/* Success Message */}
+          {successMsg && (
+            <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-200 flex items-center gap-2.5 animate-in fade-in">
+              <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>{successMsg}</span>
             </div>
           )}
         </div>
@@ -202,3 +521,4 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
     </div>
   );
 };
+

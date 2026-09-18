@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { calculateEMASeries, calculateBollingerBands } from '../utils/indicators';
+import { calculateEMASeries, calculateBollingerBands, calculateSMA, calculateSMASeries } from '../utils/indicators';
 import { Eye, EyeOff, Maximize2, RefreshCw } from 'lucide-react';
 
 interface LiveChartProps {
@@ -22,6 +22,7 @@ export const LiveChart: React.FC<LiveChartProps> = ({
 
   const [showEMA9, setShowEMA9] = useState(true);
   const [showEMA21, setShowEMA21] = useState(true);
+  const [showSMA10, setShowSMA10] = useState(true);
   const [showBollinger, setShowBollinger] = useState(true);
   const [hoverData, setHoverData] = useState<{ price: number; digit: number; index: number; x: number; y: number } | null>(null);
 
@@ -56,7 +57,7 @@ export const LiveChart: React.FC<LiveChartProps> = ({
   // 2. Redraw whenever prices, digits, or overlays change!
   useEffect(() => {
     drawChart();
-  }, [prices, digits, showEMA9, showEMA21, showBollinger, pip]);
+  }, [prices, digits, showEMA9, showEMA21, showSMA10, showBollinger, pip]);
 
   const drawChart = () => {
     const canvas = canvasRef.current;
@@ -179,7 +180,22 @@ export const LiveChart: React.FC<LiveChartProps> = ({
       }
     }
 
-    // 3. EMA 21 (Amber)
+    // 3. SMA 10 (Violet/Purple)
+    if (showSMA10 && visiblePrices.length >= 10) {
+      const sma10Series = calculateSMASeries(visiblePrices, 10);
+      ctx.beginPath();
+      ctx.strokeStyle = '#a855f7';
+      ctx.lineWidth = 1.8;
+      for (let i = 0; i < sma10Series.length; i++) {
+        const x = getX(i);
+        const y = getY(sma10Series[i]);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    // 4. EMA 21 (Amber)
     if (showEMA21 && visiblePrices.length >= 21) {
       const ema21Series = calculateEMASeries(visiblePrices, 21);
       ctx.beginPath();
@@ -194,7 +210,7 @@ export const LiveChart: React.FC<LiveChartProps> = ({
       ctx.stroke();
     }
 
-    // 4. EMA 9 (Cyan)
+    // 5. EMA 9 (Cyan)
     if (showEMA9 && visiblePrices.length >= 9) {
       const ema9Series = calculateEMASeries(visiblePrices, 9);
       ctx.beginPath();
@@ -283,7 +299,7 @@ export const LiveChart: React.FC<LiveChartProps> = ({
 
   useEffect(() => {
     drawChart();
-  }, [prices, digits, currentPrice, showEMA9, showEMA21, showBollinger]);
+  }, [prices, digits, currentPrice, showEMA9, showEMA21, showSMA10, showBollinger]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
@@ -332,6 +348,17 @@ export const LiveChart: React.FC<LiveChartProps> = ({
 
         {/* Toggle Overlays */}
         <div className="flex items-center gap-3 text-xs font-mono">
+          <button
+            onClick={() => setShowSMA10(!showSMA10)}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+              showSMA10 ? 'bg-purple-500/20 text-purple-300 font-bold' : 'text-slate-500 hover:text-slate-400'
+            }`}
+            title="Toggle 10-period Simple Moving Average line"
+          >
+            <span className="w-2 h-2 rounded-full bg-purple-400" />
+            SMA 10
+          </button>
+
           <button
             onClick={() => setShowEMA9(!showEMA9)}
             className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
@@ -382,11 +409,16 @@ export const LiveChart: React.FC<LiveChartProps> = ({
             className="absolute pointer-events-none bg-slate-900/95 border border-slate-700 shadow-xl rounded-lg px-2.5 py-1.5 text-[11px] font-mono z-30"
             style={{
               left: `${Math.min(hoverData.x + 12, (containerRef.current?.clientWidth || 300) - 130)}px`,
-              top: `${Math.max(10, hoverData.y - 45)}px`,
+              top: `${Math.max(10, hoverData.y - 50)}px`,
             }}
           >
             <div className="text-slate-400">Price: <span className="text-white font-bold">{hoverData.price.toFixed(pip)}</span></div>
             <div className="text-slate-400">Digit: <span className="text-amber-400 font-extrabold">{hoverData.digit}</span></div>
+            {showSMA10 && prices.length >= 10 && (
+              <div className="text-slate-400">
+                SMA 10: <span className="text-purple-300 font-bold">{calculateSMA(prices.slice(0, prices.length - Math.min(prices.length, 120) + hoverData.index + 1), 10).toFixed(pip)}</span>
+              </div>
+            )}
           </div>
         )}
       </div>

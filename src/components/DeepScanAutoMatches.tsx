@@ -226,11 +226,39 @@ export const DeepScanAutoMatches: React.FC<DeepScanAutoMatchesProps> = ({
               <input type="number" min="0" max="9" value={config.customTargetDigit ?? 0} onChange={(e) => updateConfig({ ...config, customTargetDigit: Math.max(0, Math.min(9, Number(e.target.value))) })} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono" />
             </label>
           )}
-          <label className="block text-xs text-slate-400">Recovery display mode
-            <select value={recoveryMode} onChange={(e) => onRecoveryModeChange(e.target.value as typeof recoveryMode)} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
-              <option value="X2_SUPER_RECOVERY">X2 recovery planning</option>
-              <option value="X4_SUPER_RECOVERY">X4 recovery planning</option>
+          <label className="block text-xs text-slate-400">Run & Stop Mode
+            <select
+              value={config.stopConditionMode ?? 'ONLY_MANUAL_OR_TARGET'}
+              onChange={(e) => updateConfig({ ...config, stopConditionMode: e.target.value as AutoMatchesConfig['stopConditionMode'] })}
+              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs font-mono"
+            >
+              <option value="ONLY_MANUAL_OR_TARGET">24/7 Run (Stop only by me or Target 100%)</option>
+              <option value="STOP_ON_MAX_LOSS">Stop on Max Loss Limit</option>
             </select>
+          </label>
+
+          <label className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-950 border border-slate-800 cursor-pointer text-xs">
+            <input
+              type="checkbox"
+              checked={config.profitShieldActive ?? true}
+              onChange={(e) => updateConfig({ ...config, profitShieldActive: e.target.checked })}
+              className="rounded text-emerald-500 focus:ring-emerald-400"
+            />
+            <div>
+              <div className="font-bold text-emerald-400">100% Won Profit Vault Shield</div>
+              <div className="text-[10px] text-slate-400">Lock in won profits: never give back accumulated profit</div>
+            </div>
+          </label>
+
+          <label className="block text-xs text-slate-400">Target Profit ($)
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={config.expectedProfit ?? 20}
+              onChange={(e) => updateConfig({ ...config, expectedProfit: Math.max(1, Number(e.target.value)) })}
+              className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white font-mono"
+            />
           </label>
           <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-[11px] text-slate-400 font-mono space-y-1">
             <div>Trades settled: {sessionStats.totalTrades}</div>

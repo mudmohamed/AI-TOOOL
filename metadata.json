@@ -1,5 +1,5 @@
 {
-  "name": "Deriv Market Matrix & Recovery Engine",
+  "name": "SKIPPER AI TOOL",
   "description": "Deriv WebSocket market analysis with observed digit statistics, authenticated proposal/buy execution, live balance updates, contract settlement monitoring, and configurable recovery risk controls.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

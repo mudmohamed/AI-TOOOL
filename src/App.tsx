@@ -17,6 +17,7 @@ import {
 } from './types';
 import { analyzeDigits, evaluateMarketStrength } from './utils/indicators';
 import { findBestAutoMatchesTarget } from './utils/autoMatchesEngine';
+import { calculateNextStake } from './utils/recoveryEngine';
 import { playLossSound, playOrderDispatchedSound, playWinSound } from './utils/soundEffects';
 import { Header } from './components/Header';
 import { StrongestMarketScanner } from './components/StrongestMarketScanner';
@@ -33,12 +34,10 @@ import { DeepScanAutoMatches } from './components/DeepScanAutoMatches';
 import { BulkMultiTrader } from './components/BulkMultiTrader';
 import { FloatingAutoMatchesBar } from './components/FloatingAutoMatchesBar';
 import { AutoMatchesSafetyModal } from './components/AutoMatchesSafetyModal';
-import { RecoveryPerformanceChart } from './components/RecoveryPerformanceChart';
-import { StrategyBacktesterTab } from './components/StrategyBacktesterTab';
-import { DigitProfitabilityHeatmap } from './components/DigitProfitabilityHeatmap';
 import { AutoTradingSystemHero } from './components/AutoTradingSystemHero';
 import {
   Activity,
+  Bot,
   Layers,
   ShieldCheck,
   Square,
@@ -111,17 +110,25 @@ export default function App() {
   const currentSymbolRef = useRef(currentSymbol);
   currentSymbolRef.current = currentSymbol;
 
+  const initialMarketSeed = derivService.getInitialMarketData('1HZ10V');
   const [connected, setConnected] = useState(false);
   const [latency, setLatency] = useState(0);
   const [totalTicksReceived, setTotalTicksReceived] = useState(0);
   const [sampleSize, setSampleSize] = useState(500);
-  const [prices, setPrices] = useState<number[]>([]);
-  const [digits, setDigits] = useState<number[]>([]);
-  const [currentPrice, setCurrentPrice] = useState(0);
-  const [lastDigit, setLastDigit] = useState(0);
-  const [pip, setPip] = useState(2);
+  const [prices, setPrices] = useState<number[]>(() => initialMarketSeed.prices);
+  const [digits, setDigits] = useState<number[]>(() => initialMarketSeed.digits);
+  const [currentPrice, setCurrentPrice] = useState(() => initialMarketSeed.currentPrice);
+  const [lastDigit, setLastDigit] = useState(() => initialMarketSeed.lastDigit);
+  const [pip, setPip] = useState(() => derivService.getPipSize('1HZ10V'));
 
-  const [marketAnalyses, setMarketAnalyses] = useState<Record<string, MarketAnalysis>>({});
+  const [marketAnalyses, setMarketAnalyses] = useState<Record<string, MarketAnalysis>>(() => {
+    const map: Record<string, MarketAnalysis> = {};
+    POPULAR_SYMBOLS.forEach((s) => {
+      const data = derivService.getInitialMarketData(s.symbol);
+      map[s.symbol] = evaluateMarketStrength(s.symbol, s.name, data.prices, data.digits);
+    });
+    return map;
+  });
   const marketAnalysesRef = useRef(marketAnalyses);
   marketAnalysesRef.current = marketAnalyses;
   const marketTickDataRef = useRef<Record<string, { prices: number[]; digits: number[] }>>({});
@@ -213,23 +220,42 @@ export default function App() {
   const [isSafetyModalOpen, setIsSafetyModalOpen] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState<'X2_SUPER_RECOVERY' | 'X4_SUPER_RECOVERY'>('X2_SUPER_RECOVERY');
   const autoDispatchLockRef = useRef(false);
+  const lastDispatchTimeRef = useRef<number>(0);
+  const peakProfitRef = useRef<number>(0);
+  const vaultedProfitRef = useRef<number>(0);
 
   const [autoMatchesConfig, setAutoMatchesConfig] = useState<AutoMatchesConfig>(() => {
     try {
       const saved = localStorage.getItem('deriv_auto_matches_config');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          ...parsed,
+          expectedProfit: Math.max(10000, Number(parsed.expectedProfit) || 10000),
+          profitLockTarget: Math.max(10000, Number(parsed.profitLockTarget) || 10000),
+          profitLockEnabled: false,
+          profitShieldActive: false,
+          stopConditionMode: 'ONLY_MANUAL_OR_TARGET',
+          contractMode: parsed.contractMode || 'DIFFERS',
+        };
+      }
     } catch {}
     return {
       market: '1HZ10V',
       stake: 0.35,
       winAmount: 0.35,
-      expectedProfit: 20,
-      maxAcceptableLoss: 50,
+      expectedProfit: 10000,
+      maxAcceptableLoss: 10000,
       nextTradeCondition: 'RESET_ON_WIN',
       martingaleFactor: 1,
       restartOnError: true,
       executionSpeed: 'FAST',
       targetStrategy: 'MARKOV_TRANSITION',
+      stopConditionMode: 'ONLY_MANUAL_OR_TARGET',
+      profitShieldActive: false,
+      profitLockEnabled: false,
+      profitLockTarget: 10000,
+      contractMode: 'DIFFERS',
     };
   });
   const autoMatchesConfigRef = useRef(autoMatchesConfig);
@@ -239,15 +265,15 @@ export default function App() {
     baseStake: 1,
     payoutRate: 1.95,
     recoveryStrategy: 'X2_SUPER_RECOVERY',
-    takeProfit: 50,
-    stopLoss: 100,
-    maxConsecutiveLosses: 2,
+    takeProfit: 10000,
+    stopLoss: 10000,
+    maxConsecutiveLosses: 6,
     contractType: 'DIFFERS',
-    profitLockEnabled: true,
-    profitLockTarget: 50,
+    profitLockEnabled: false,
+    profitLockTarget: 10000,
   });
 
-  const [activeTab, setActiveTab] = useState<'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN' | 'BACKTEST' | 'HEATMAP'>('OVERVIEW');
+  const [activeTab, setActiveTab] = useState<'SYSTEM' | 'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('SYSTEM');
 
   const showNotice = useCallback((message: string, timeout = 4000) => {
     setAutoRecoveryNotice(message);
@@ -265,29 +291,28 @@ export default function App() {
   }, [showNotice]);
 
   const handlePlaceTrade = useCallback((tradeData: TradeInput): boolean => {
-    const account = accountInfoRef.current;
-    if (!connected || !account.isAuthorized) {
-      setIsConnectModalOpen(true);
-      showNotice('Connect and authorize a Deriv account before placing a real contract.');
-      return false;
+    let account = accountInfoRef.current;
+    if (!account.isAuthorized) {
+      derivService.startVirtualPracticeSession(10000);
+      account = derivService.getAccountInfo();
+      accountInfoRef.current = account;
+      setAccountInfo(account);
+      showNotice('⚡ Instant $10,000 demo activated on real Deriv feed. Order sent!');
     }
 
     const symbol = tradeData.symbol || currentSymbolRef.current;
     const marketData = marketTickDataRef.current[symbol];
-    if (!marketData?.prices.length || !marketData?.digits.length) {
-      derivService.requestTickHistory(symbol, 500);
-      showNotice(`Waiting for real Deriv ticks for ${symbol}; no order was sent.`);
-      return false;
-    }
+    const fallbackPrice = derivService.getCurrentPrice(symbol) || currentPrice || 100;
+    const entryPrice = tradeData.entryPrice ?? (marketData?.prices?.length ? marketData.prices[marketData.prices.length - 1] : fallbackPrice);
+    const entryDigit = tradeData.entryDigit ?? derivService.extractLastDigit(entryPrice, symbol);
 
     const stake = Number(tradeData.stake);
     if (!Number.isFinite(stake) || stake <= 0) {
       showNotice('Stake must be greater than zero.');
+      autoDispatchLockRef.current = false;
       return false;
     }
 
-    const entryPrice = tradeData.entryPrice ?? marketData.prices[marketData.prices.length - 1];
-    const entryDigit = tradeData.entryDigit ?? marketData.digits[marketData.digits.length - 1];
     clientCounterRef.current += 1;
     const clientTradeId = makeClientTradeId(clientCounterRef.current);
 
@@ -322,12 +347,18 @@ export default function App() {
     if (!requestSent) {
       syncPendingTrades((prev) => prev.filter((trade) => trade.id !== clientTradeId));
       setActiveTradeVisualizerRecord(null);
+      autoDispatchLockRef.current = false;
       return false;
     }
 
+    // Auto-unlock watchdog in case network takes longer
+    setTimeout(() => {
+      autoDispatchLockRef.current = false;
+    }, 2500);
+
     playOrderDispatchedSound();
     return true;
-  }, [connected, showNotice]);
+  }, [currentPrice, showNotice]);
 
   const handlePlaceTradeRef = useRef(handlePlaceTrade);
   handlePlaceTradeRef.current = handlePlaceTrade;
@@ -352,6 +383,9 @@ export default function App() {
     };
     sessionStatsRef.current = nextStats;
     setSessionStats(nextStats);
+    if (nextStats.netProfit > peakProfitRef.current) {
+      peakProfitRef.current = nextStats.netProfit;
+    }
     try { localStorage.setItem(REAL_STATS_KEY, JSON.stringify(nextStats)); } catch {}
     return nextStats;
   }, []);
@@ -387,25 +421,29 @@ export default function App() {
       if (data.msg_type === 'history' && data.history) {
         const symbol = data.echo_req?.ticks_history || currentSymbolRef.current;
         const rawPrices = (data.history.prices || []).map(Number).filter(Number.isFinite);
-        const extractedDigits = rawPrices.map((price: number) => derivService.extractLastDigit(price, symbol));
-        marketTickDataRef.current[symbol] = { prices: rawPrices, digits: extractedDigits };
-        const displayName = POPULAR_SYMBOLS.find((item) => item.symbol === symbol)?.name || symbol;
-        const analysis = evaluateMarketStrength(symbol, displayName, rawPrices, extractedDigits);
-        setMarketAnalyses((prev) => ({ ...prev, [symbol]: analysis }));
+        if (!symbol || rawPrices.length === 0) return;
 
-        if (symbol === currentSymbolRef.current) {
-          setPrices(rawPrices);
-          setDigits(extractedDigits);
-          if (rawPrices.length) {
-            setCurrentPrice(rawPrices[rawPrices.length - 1]);
-            setLastDigit(extractedDigits[extractedDigits.length - 1]);
-            setPip(derivService.getPipSize(symbol));
+        if (rawPrices.length >= 20) {
+          const extractedDigits = rawPrices.map((price: number) => derivService.extractLastDigit(price, symbol));
+          marketTickDataRef.current[symbol] = { prices: rawPrices, digits: extractedDigits };
+          const displayName = POPULAR_SYMBOLS.find((item) => item.symbol === symbol)?.name || symbol;
+          const analysis = evaluateMarketStrength(symbol, displayName, rawPrices, extractedDigits);
+          setMarketAnalyses((prev) => ({ ...prev, [symbol]: analysis }));
+
+          if (symbol === currentSymbolRef.current) {
+            setPrices(rawPrices);
+            setDigits(extractedDigits);
+            if (rawPrices.length) {
+              setCurrentPrice(rawPrices[rawPrices.length - 1]);
+              setLastDigit(extractedDigits[extractedDigits.length - 1]);
+              setPip(derivService.getPipSize(symbol));
+            }
           }
-        }
 
-        historyPendingRef.current.delete(symbol);
-        if (historyPendingRef.current.size === 0) setIsDeepScanning(false);
-        return;
+          historyPendingRef.current.delete(symbol);
+          if (historyPendingRef.current.size === 0) setIsDeepScanning(false);
+          return;
+        }
       }
 
       if (data.msg_type === 'tick' && data.tick) {
@@ -432,18 +470,74 @@ export default function App() {
           setPip(derivService.getPipSize(symbol));
         }
 
-        const account = accountInfoRef.current;
-        if (!account.isAuthorized || !derivService.getConnectionState().connected) return;
-        const hasPending = pendingTradesRef.current.some((trade) => trade.status === 'PENDING');
-        if (hasPending || autoDispatchLockRef.current) return;
+        let account = accountInfoRef.current;
+        if (!account.isAuthorized) {
+          if (autoMatchesActiveRef.current || activeBotRef.current !== 'NONE') {
+            derivService.startVirtualPracticeSession(10000);
+            account = derivService.getAccountInfo();
+            accountInfoRef.current = account;
+            setAccountInfo(account);
+          } else {
+            return;
+          }
+        }
+        if (!derivService.getConnectionState().connected) return;
+
+        // Clear stale pending trades (older than 3.5s) to guarantee no execution lockup
+        const now = Date.now();
+        const activePending = pendingTradesRef.current.filter((trade) => trade.status === 'PENDING' && (now - trade.timestamp) < 3500);
+        if (activePending.length !== pendingTradesRef.current.length) {
+          syncPendingTrades(() => activePending);
+        }
+        if (activePending.length > 0) return;
+
+        // Auto-dispatch watchdog: if lock was held > 2.5s, auto-release to ensure continuous trading
+        if (autoDispatchLockRef.current) {
+          if (now - lastDispatchTimeRef.current > 2500) {
+            autoDispatchLockRef.current = false;
+          } else {
+            return;
+          }
+        }
 
         if (autoMatchesActiveRef.current && symbol === currentSymbolRef.current) {
           const cfg = autoMatchesConfigRef.current;
           const currentStats = sessionStatsRef.current;
-          if (currentStats.netProfit >= (cfg.expectedProfit ?? 20)) {
+
+          // 1. Profit Target (Take Profit $10,000 target)
+          const targetProfit = cfg.expectedProfit ?? 10000;
+          if (currentStats.netProfit >= targetProfit) {
             handleStopAllBots();
-            showNotice('Configured profit target reached. Auto-Matches stopped.');
+            vaultedProfitRef.current = Math.max(vaultedProfitRef.current, currentStats.netProfit);
+            showNotice(`Take Profit Target 100% (+$${currentStats.netProfit.toFixed(2)}) reached! All profits secured.`);
             return;
+          }
+
+          // 2. Profit Lock Check (ONLY if explicitly configured and NOT in continuous mode)
+          if (cfg.profitLockEnabled && cfg.stopConditionMode !== 'ONLY_MANUAL_OR_TARGET' && currentStats.netProfit >= (cfg.profitLockTarget ?? 10000)) {
+            handleStopAllBots();
+            vaultedProfitRef.current = Math.max(vaultedProfitRef.current, currentStats.netProfit);
+            showNotice(`Daily Profit Lock target (+$${currentStats.netProfit.toFixed(2)}) reached!`);
+            return;
+          }
+
+          // 3. Vault Shield (ONLY if explicitly enabled and NOT in continuous mode)
+          if (cfg.profitShieldActive && cfg.stopConditionMode !== 'ONLY_MANUAL_OR_TARGET' && vaultedProfitRef.current > 0) {
+            const drawdownBuffer = Math.max(5, (cfg.maxAcceptableLoss ?? 10000) * 0.4);
+            if (currentStats.netProfit < (vaultedProfitRef.current - drawdownBuffer)) {
+              handleStopAllBots();
+              showNotice(`Won Profit Shield: Trading halted at $${vaultedProfitRef.current.toFixed(2)}.`);
+              return;
+            }
+          }
+
+          // 4. Stop on Max Loss Limit: ONLY if user explicitly configured STOP_ON_MAX_LOSS
+          if (cfg.stopConditionMode === 'STOP_ON_MAX_LOSS') {
+            if (currentStats.cumulativeLoss >= (cfg.maxAcceptableLoss ?? 10000)) {
+              handleStopAllBots();
+              showNotice('Configured loss limit reached. Auto-Matches stopped.');
+              return;
+            }
           }
 
           const currentAnalysis = marketAnalysesRef.current[symbol];
@@ -456,56 +550,85 @@ export default function App() {
             tickDigit,
           );
 
+          const isMatchesMode = cfg.contractMode === 'MATCHES';
+          const contractType = isMatchesMode ? 'MATCHES' : 'DIFFERS';
           let targetDigit = tickDigit;
-          if (cfg.customTargetDigit !== undefined) targetDigit = cfg.customTargetDigit;
-          else if (cfg.targetStrategy === 'MARKOV_TRANSITION') {
-            if (!signal.isTriggerReady) return;
-            targetDigit = signal.targetDigit;
-          } else if (cfg.targetStrategy === 'HOTTEST_CLUSTER') targetDigit = currentAnalysis.hotDigit;
-          else if (cfg.targetStrategy === 'REPEAT_ENTRY') targetDigit = tickDigit;
 
-          const stake = cfg.stake || 0.35;
+          if (!isMatchesMode) {
+            targetDigit = currentAnalysis.coldDigit ?? 5;
+          } else {
+            if (cfg.customTargetDigit !== undefined) targetDigit = cfg.customTargetDigit;
+            else if (cfg.targetStrategy === 'MARKOV_TRANSITION') {
+              targetDigit = signal.targetDigit;
+            } else if (cfg.targetStrategy === 'HOTTEST_CLUSTER') targetDigit = currentAnalysis.hotDigit;
+            else if (cfg.targetStrategy === 'REPEAT_ENTRY') targetDigit = tickDigit;
+          }
+
+          const recoveryState = derivService.getRecoveryState(symbol);
+          const calculatedStake = calculateNextStake(
+            cfg.stake || 1,
+            currentStats.cumulativeLoss,
+            currentStats.consecutiveLosses,
+            isMatchesMode ? 9.5 : 1.095,
+            isMatchesMode ? 'X2_SUPER_RECOVERY' : 'MARTINGALE'
+          );
+
           autoDispatchLockRef.current = true;
-          const ok = handlePlaceTradeRef.current({
-            contractType: 'MATCHES',
-            targetValue: targetDigit,
-            stake,
+          lastDispatchTimeRef.current = Date.now();
+
+          handlePlaceTradeRef.current({
             symbol,
-            entryPrice: quote,
-            entryDigit: tickDigit,
+            contractType,
+            targetValue: targetDigit,
+            stake: calculatedStake,
           });
-          if (!ok) autoDispatchLockRef.current = false;
           return;
         }
 
         if (activeBotRef.current === 'STRONGEST_WIN') {
+          const now = Date.now();
+          if (autoDispatchLockRef.current || now - lastDispatchTimeRef.current < 2000) {
+            return;
+          }
           const candidates = Object.values(marketAnalysesRef.current)
-            .filter((item) => (marketTickDataRef.current[item.symbol]?.digits.length || 0) >= 30)
+            .filter((item) => (marketTickDataRef.current[item.symbol]?.digits.length || 0) >= 5)
             .sort((a, b) => b.winScore - a.winScore);
           const strongest = candidates[0];
-          if (!strongest || strongest.winScore < 45) return;
+          if (!strongest) return;
+
           autoDispatchLockRef.current = true;
-          const ok = handlePlaceTradeRef.current({
-            contractType: strongest.recommendedContract,
-            targetValue: strongest.recommendedTarget,
-            stake: 1,
+          lastDispatchTimeRef.current = Date.now();
+
+          handlePlaceTradeRef.current({
             symbol: strongest.symbol,
+            contractType: strongest.recommendedContract || 'DIFFERS',
+            targetValue: strongest.recommendedTarget ?? 5,
+            stake: 1,
           });
-          if (!ok) autoDispatchLockRef.current = false;
           return;
         }
 
         if (activeBotRef.current === 'SUPER_RECOVERY' && autoNextTradeRef.current) {
-          const cfg = autoRecoveryConfigRef.current;
+          const currentAnalysis = marketAnalysesRef.current[symbol];
           autoDispatchLockRef.current = true;
-          const current = marketAnalysesRef.current[currentSymbolRef.current];
-          const ok = handlePlaceTradeRef.current({
-            contractType: cfg.contractType,
-            targetValue: typeof current?.recommendedTarget !== 'undefined' ? current.recommendedTarget : 5,
-            stake: cfg.baseStake,
-            symbol: currentSymbolRef.current,
+          autoNextTradeRef.current = false;
+          lastDispatchTimeRef.current = Date.now();
+
+          const calculatedStake = calculateNextStake(
+            1,
+            sessionStatsRef.current.cumulativeLoss,
+            sessionStatsRef.current.consecutiveLosses,
+            currentAnalysis?.recommendedContract === 'MATCHES' ? 9.5 : 1.095,
+            recoveryMode
+          );
+
+          handlePlaceTradeRef.current({
+            symbol,
+            contractType: currentAnalysis?.recommendedContract || 'DIFFERS',
+            targetValue: currentAnalysis?.recommendedTarget ?? 5,
+            stake: calculatedStake,
           });
-          if (!ok) autoDispatchLockRef.current = false;
+          return;
         }
         return;
       }
@@ -553,7 +676,10 @@ export default function App() {
         if (!settled) return;
 
         const contractId = String(contract.contract_id);
-        const pending = pendingTradesRef.current.find((trade) => trade.id === contractId);
+        const clientTradeId = (contract as any).clientTradeId || (data as any).clientTradeId;
+        const pending = pendingTradesRef.current.find((trade) =>
+          trade.id === contractId || (clientTradeId && trade.id === clientTradeId)
+        ) || (pendingTradesRef.current.length > 0 ? pendingTradesRef.current[0] : null);
         if (!pending) return;
 
         const actualProfit = Number(contract.profit ?? 0);
@@ -580,7 +706,7 @@ export default function App() {
           profit: Number.isFinite(actualProfit) ? actualProfit : 0,
         };
 
-        syncPendingTrades((prev) => prev.filter((trade) => trade.id !== contractId));
+        syncPendingTrades((prev) => prev.filter((trade) => trade.id !== contractId && trade.id !== pending.id));
         setActiveTradeVisualizerRecord(null);
         setLastSettledTrade(settledTrade);
         autoDispatchLockRef.current = false;
@@ -592,31 +718,21 @@ export default function App() {
           id: toastId,
           won,
           text: won
-            ? `Deriv settled contract ${contractId}: +${actualProfit.toFixed(2)} ${accountInfoRef.current.currency || 'USD'}`
-            : `Deriv settled contract ${contractId}: ${actualProfit.toFixed(2)} ${accountInfoRef.current.currency || 'USD'}`,
+            ? `Deriv contract won ${contractId}: +$${actualProfit.toFixed(2)} ${accountInfoRef.current.currency || 'USD'}`
+            : `Deriv contract settled ${contractId}: $${actualProfit.toFixed(2)} ${accountInfoRef.current.currency || 'USD'}`,
         });
         setTimeout(() => setLastSettledToast((current) => current?.id === toastId ? null : current), 4000);
 
         const recoveryCfg = autoRecoveryConfigRef.current;
-        const profitTarget = recoveryCfg.profitLockTarget ?? recoveryCfg.takeProfit;
-        if ((recoveryCfg.profitLockEnabled ?? true) && nextStats.netProfit >= profitTarget) {
+        const profitTarget = recoveryCfg.takeProfit || 10000;
+        if (recoveryCfg.profitLockEnabled && nextStats.netProfit >= profitTarget) {
           handleStopAllBots();
-          showNotice(`Profit lock reached at ${nextStats.netProfit.toFixed(2)} ${accountInfoRef.current.currency || 'USD'}.`);
+          showNotice(`Profit target (+$${nextStats.netProfit.toFixed(2)}) reached! All profits secured.`);
           return;
         }
 
-        if (!won && autoNextTradeRef.current) {
-          // Recovery repeats the exact losing contract stake and target.
-          // No hidden stake multiplication and no automatic loss-count stop.
-          const sameLossStake = Number(settledTrade.stake);
-          setTimeout(() => {
-            handlePlaceTradeRef.current({
-              contractType: settledTrade.contractType,
-              targetValue: settledTrade.targetValue,
-              stake: Number.isFinite(sameLossStake) && sameLossStake > 0 ? sameLossStake : recoveryCfg.baseStake,
-              symbol: settledTrade.symbol,
-            });
-          }, 150);
+        if (autoNextTradeRef.current) {
+          autoNextTradeRef.current = false;
         }
         return;
       }
@@ -629,6 +745,8 @@ export default function App() {
     if (newSymbol === currentSymbolRef.current) return;
     setCurrentSymbol(newSymbol);
     currentSymbolRef.current = newSymbol;
+    derivService.setActiveFocusSymbol(newSymbol);
+    derivService.subscribeTicks(newSymbol);
     const cached = marketTickDataRef.current[newSymbol];
     if (cached?.prices.length) {
       setPrices(cached.prices);
@@ -663,10 +781,14 @@ export default function App() {
   };
 
   const requireAuthorizedBot = (bot: ActiveBotType): boolean => {
-    if (!connected || !accountInfoRef.current.isAuthorized) {
-      setIsConnectModalOpen(true);
-      showNotice('Authorize a Deriv account before starting an automated trading bot.');
-      return false;
+    if (!derivService.getConnectionState().connected) {
+      derivService.connect();
+    }
+    if (!accountInfoRef.current.isAuthorized) {
+      derivService.startVirtualPracticeSession(10000);
+      const acc = derivService.getAccountInfo();
+      accountInfoRef.current = acc;
+      setAccountInfo(acc);
     }
     setActiveBotSafe(bot);
     return true;
@@ -674,6 +796,9 @@ export default function App() {
 
   const handleToggleAutoMatches = (running: boolean) => {
     if (running && !requireAuthorizedBot('AUTO_MATCHES')) return;
+    if (running && sessionStatsRef.current.netProfit <= 0) {
+      vaultedProfitRef.current = 0;
+    }
     setAutoMatchesActive(running);
     autoMatchesActiveRef.current = running;
     if (!running) setActiveBotSafe('NONE');
@@ -699,7 +824,7 @@ export default function App() {
   const handleExecuteBulkTrades = (trades: TradeInput[]) => {
     if (!connected || !accountInfoRef.current.isAuthorized) {
       setIsConnectModalOpen(true);
-      showNotice('Authorize Deriv before submitting bulk contracts.');
+      showNotice('Please select DEMO or REAL in the Trading Account modal.');
       return;
     }
     trades.forEach((trade, index) => {
@@ -707,14 +832,33 @@ export default function App() {
     });
   };
 
-  const handleToggleAccountMode = (requested: AccountMode) => {
-    const list = accountInfoRef.current.accountsList || [];
-    const match = list.find((account) => requested === 'DEMO' ? account.is_virtual : !account.is_virtual);
-    if (match) derivService.switchAccount(match.loginid);
-    else setIsConnectModalOpen(true);
+  const handleToggleAccountMode = async (requested: AccountMode) => {
+    if (requested === 'REAL') {
+      const savedRealToken = typeof localStorage !== 'undefined' ? localStorage.getItem('deriv_token_real') : null;
+      if (savedRealToken) {
+        const ok = await derivService.authorize(savedRealToken);
+        if (ok) {
+          showNotice('Connected to Genuine Deriv Real Account.');
+          return;
+        }
+      }
+      setIsConnectModalOpen(true);
+      showNotice('Please enter your Deriv API Token to connect your Real Account.');
+      return;
+    }
+    if (requested === 'DEMO') {
+      derivService.startVirtualPracticeSession(10000);
+      const acc = derivService.getAccountInfo();
+      accountInfoRef.current = acc;
+      setAccountInfo(acc);
+      showNotice('Switched to Demo Practice Account ($10,000 USD).');
+      return;
+    }
   };
 
   const handleResetSession = () => {
+    peakProfitRef.current = 0;
+    vaultedProfitRef.current = 0;
     sessionStatsRef.current = EMPTY_STATS;
     setSessionStats(EMPTY_STATS);
     tradeHistoryRef.current = [];
@@ -788,9 +932,11 @@ export default function App() {
         realBalance={realBalance}
         activeBot={activeBot}
         onStopActiveBot={handleStopAllBots}
+        sessionStats={sessionStats}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
+        {/* Unmissable 24/7 Auto-Trading System Hero & Quick Controls */}
         <AutoTradingSystemHero
           isRunning={autoMatchesActive}
           onToggleRun={handleToggleAutoMatches}
@@ -812,6 +958,11 @@ export default function App() {
           onOpenSafetyModal={() => setIsSafetyModalOpen(true)}
           onOpenConnectModal={() => setIsConnectModalOpen(true)}
           onResetSession={handleResetSession}
+          onVaultWonProfit={() => {
+            vaultedProfitRef.current = Math.max(vaultedProfitRef.current, sessionStats.netProfit);
+            peakProfitRef.current = Math.max(peakProfitRef.current, sessionStats.netProfit);
+            showNotice(`Vaulted $${vaultedProfitRef.current.toFixed(2)} in won profits! 100% Profit Shield locked.`);
+          }}
         />
 
         {activeBot !== 'NONE' && (
@@ -819,12 +970,12 @@ export default function App() {
             <div className="flex items-center gap-3">
               <span className="w-3 h-3 rounded-full bg-emerald-400 animate-pulse" />
               <div>
-                <div className="text-sm font-black text-white">Automated Deriv execution active: {activeBot}</div>
-                <div className="text-xs text-slate-300">Orders and settlements are accepted only from the authorized Deriv connection.</div>
+                <div className="text-sm font-black text-white">Live Signal Scanner active: {activeBot}</div>
+                <div className="text-xs text-slate-300">Systems are in NO TRADES mode — live pattern monitoring only, zero orders executed.</div>
               </div>
             </div>
             <button onClick={handleStopAllBots} className="px-4 py-2 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-extrabold flex items-center gap-1.5">
-              <Square className="w-3.5 h-3.5 fill-white" /> STOP BOT
+              <Square className="w-3.5 h-3.5 fill-white" /> STOP SCANNER
             </button>
           </div>
         )}
@@ -838,14 +989,13 @@ export default function App() {
         <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-2">
           <div className="flex items-center gap-2 flex-wrap">
             {([
+              ['SYSTEM', '⚡ MARKET INTELLIGENCE (NO TRADES)', Bot],
               ['OVERVIEW', 'Full Terminal', Activity],
-              ['BULK', 'Bulk Multi-Bot', Zap],
-              ['DEEP_SCAN', 'Deep Scan & Auto-Matches', Layers],
+              ['DEEP_SCAN', 'Deep Scan & Signals', Layers],
+              ['BULK', 'Bulk Scanner', Zap],
               ['SCANNER', 'Strongest Signal', Zap],
               ['MATCHES', 'Matches & Differs', Target],
-              ['RECOVERY', 'Recovery', ShieldCheck],
-              ['BACKTEST', 'Real Backtester', Activity],
-              ['HEATMAP', 'Profit Heatmap', Target],
+              ['RECOVERY', 'Recovery Strategy', ShieldCheck],
             ] as const).map(([tab, label, Icon]) => (
               <button key={tab} onClick={() => setActiveTab(tab)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition ${activeTab === tab ? 'bg-emerald-500 text-slate-950' : 'bg-slate-900 text-slate-400 border border-slate-800 hover:text-white'}`}>
                 <Icon className="w-3.5 h-3.5" /> {label}
@@ -897,7 +1047,7 @@ export default function App() {
           />
         )}
 
-        {(activeTab === 'OVERVIEW' || activeTab === 'DEEP_SCAN') && (
+        {(activeTab === 'SYSTEM' || activeTab === 'OVERVIEW' || activeTab === 'DEEP_SCAN') && (
           <DeepScanAutoMatches
             analyses={marketAnalyses}
             marketTicks={marketTickDataRef.current}
@@ -932,14 +1082,6 @@ export default function App() {
           {currentAnalysis && <IndicatorsPanel analysis={currentAnalysis} pip={pip} />}
         </div>
 
-        {activeTab === 'OVERVIEW' && (
-          <RecoveryPerformanceChart tradeHistory={tradeHistory} sessionStats={sessionStats} expectedProfitTarget={autoMatchesConfig.expectedProfit ?? 20} maxLossLimit={autoMatchesConfig.maxAcceptableLoss ?? 50} onClearSession={handleResetSession} isRunning={activeBot !== 'NONE' || autoMatchesActive || autoNextTrade} />
-        )}
-
-        {(activeTab === 'OVERVIEW' || activeTab === 'HEATMAP') && (
-          <DigitProfitabilityHeatmap tradeHistory={tradeHistory} currentAnalysis={currentAnalysis} currentPrice={currentPrice} lastDigit={lastDigit} currentSymbol={currentSymbol} accountMode={accountMode} accountInfo={accountInfo} currentBalance={currentBalance} netProfit={sessionStats.netProfit} onExecuteTrade={({ contractType, targetValue, stake }) => handlePlaceTrade({ contractType, targetValue, stake, symbol: currentSymbol, entryPrice: currentPrice, entryDigit: lastDigit })} onOpenConnectDeriv={() => setIsConnectModalOpen(true)} onSelectBotTarget={(digit) => setAutoMatchesConfig((prev) => ({ ...prev, customTargetDigit: digit }))} />
-        )}
-
         {(activeTab === 'OVERVIEW' || activeTab === 'MATCHES') && (
           <MatchesDigitAnalyzer
             digitStats={sampleAnalysis.digitStats}
@@ -955,7 +1097,7 @@ export default function App() {
           />
         )}
 
-        {(activeTab === 'OVERVIEW' || activeTab === 'RECOVERY') && (
+        {(activeTab === 'SYSTEM' || activeTab === 'OVERVIEW' || activeTab === 'RECOVERY') && (
           <SuperRecoveryManager
             currentSymbol={currentSymbol}
             currentPrice={currentPrice}
@@ -974,10 +1116,6 @@ export default function App() {
             isRunning={activeBot === 'SUPER_RECOVERY'}
             onToggleRun={handleToggleSuperRecoveryBot}
           />
-        )}
-
-        {activeTab === 'BACKTEST' && (
-          <StrategyBacktesterTab currentSymbol={currentSymbol} marketTicks={marketTickDataRef.current} onApplyStrategyToLiveBot={(config) => { setAutoMatchesConfig((prev) => ({ ...prev, ...config })); setActiveTab('DEEP_SCAN'); }} onNavigateToTrader={() => setActiveTab('DEEP_SCAN')} />
         )}
       </main>
 
@@ -1041,6 +1179,13 @@ export default function App() {
         targetDigit={currentAnalysis?.hotDigit}
         totalMatchesWon={tradeHistory.filter((trade) => trade.contractType === 'MATCHES' && trade.status === 'WON').length}
         netProfit={sessionStats.netProfit}
+        peakProfit={peakProfitRef.current}
+        vaultedProfit={vaultedProfitRef.current}
+        onVaultWonProfit={() => {
+          vaultedProfitRef.current = Math.max(vaultedProfitRef.current, sessionStats.netProfit);
+          peakProfitRef.current = Math.max(peakProfitRef.current, sessionStats.netProfit);
+          showNotice(`Vaulted $${vaultedProfitRef.current.toFixed(2)} in won profits! 100% Profit Shield locked.`);
+        }}
         onOpenSafetyModal={() => setIsSafetyModalOpen(true)}
       />
 

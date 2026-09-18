@@ -9,8 +9,9 @@ import {
   ArrowUpRight,
   User,
   LogOut,
+  Key,
 } from 'lucide-react';
-import { DerivAccountInfo, AccountMode, ActiveBotType, UserProfile } from '../types';
+import { DerivAccountInfo, AccountMode, ActiveBotType, UserProfile, SessionStats } from '../types';
 import { derivService } from '../services/derivWs';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -40,6 +41,7 @@ interface HeaderProps {
   realBalance?: number;
   activeBot: ActiveBotType;
   onStopActiveBot?: () => void;
+  sessionStats?: SessionStats;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -56,6 +58,7 @@ export const Header: React.FC<HeaderProps> = ({
   totalTicksReceived,
   watchlistCount = 0,
   onOpenWatchlist,
+  onOpenConnectDeriv,
   onOpenCashierDeposit,
   onOpenCashierWithdraw,
   onOpenAuth,
@@ -64,6 +67,7 @@ export const Header: React.FC<HeaderProps> = ({
   onToggleAccountMode,
   activeBot,
   onStopActiveBot,
+  sessionStats,
 }) => {
   const isPositive = priceChange >= 0;
   const currentSymbolObj = symbols.find((s) => s.symbol === currentSymbol);
@@ -77,8 +81,17 @@ export const Header: React.FC<HeaderProps> = ({
     : '—';
 
   const selectTradingMode = React.useCallback((requested: AccountMode) => {
+    if (requested === 'REAL') {
+      const hasRealToken = typeof localStorage !== 'undefined' && Boolean(localStorage.getItem('deriv_token_real'));
+      if (!accountInfo?.isAuthorized || accountInfo?.isVirtual) {
+        if (!hasRealToken) {
+          if (onOpenConnectDeriv) onOpenConnectDeriv();
+          return;
+        }
+      }
+    }
     onToggleAccountMode(requested);
-  }, [onToggleAccountMode]);
+  }, [accountInfo?.isAuthorized, accountInfo?.isVirtual, onOpenConnectDeriv, onToggleAccountMode]);
 
   const getActiveBotLabel = () => {
     switch (activeBot) {
@@ -100,7 +113,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
             <div>
               <h1 className="text-base sm:text-lg font-black tracking-tight text-white flex items-center gap-1.5">
-                DERIV MATRIX
+                SKIPPER AI TOOL
                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold border ${connected ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-rose-500/15 text-rose-300 border-rose-500/30'}`}>
                   {connected ? 'LIVE FEED' : 'OFFLINE'}
                 </span>
@@ -132,36 +145,94 @@ export const Header: React.FC<HeaderProps> = ({
             <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400" /> Withdraw
           </button>
 
+          {/* Live Net Profit & Winnings Performance Display */}
+          <div className="flex items-center gap-2 p-1.5 px-3 rounded-xl bg-slate-900 border border-emerald-500/30 shadow-inner font-mono text-xs">
+            <div className="flex flex-col text-left">
+              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider flex items-center gap-1">
+                <TrendingUp className="w-2.5 h-2.5 text-emerald-400" />
+                <span>NET PROFIT</span>
+              </span>
+              <span className={`font-black text-xs sm:text-sm ${(sessionStats?.netProfit ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {(sessionStats?.netProfit ?? 0) >= 0 ? `+$${(sessionStats?.netProfit ?? 0).toFixed(2)}` : `-$${Math.abs(sessionStats?.netProfit ?? 0).toFixed(2)}`}
+              </span>
+            </div>
+            <div className="h-6 w-px bg-slate-800 mx-0.5" />
+            <div className="flex flex-col text-left">
+              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">
+                WINNINGS
+              </span>
+              <span className="font-extrabold text-xs text-white">
+                <span className="text-emerald-300">{sessionStats?.wins ?? 0}W</span>
+                <span className="text-slate-500 mx-0.5">/</span>
+                <span className="text-slate-400">{sessionStats?.losses ?? 0}L</span>
+                <span className="text-[10px] text-emerald-400 font-bold ml-1">
+                  ({sessionStats && sessionStats.totalTrades > 0 ? ((sessionStats.wins / sessionStats.totalTrades) * 100).toFixed(0) : '100'}%)
+                </span>
+              </span>
+            </div>
+          </div>
+
           <div className="flex items-center gap-2 p-1.5 px-3 rounded-xl bg-slate-900 border border-slate-800 shadow-inner">
             <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
-            <div className="font-mono text-xs min-w-[118px]">
-              <div className="font-extrabold text-white truncate max-w-[145px]">
-                {accountInfo?.isAuthorized ? accountInfo.loginId : 'Choose account'}
-              </div>
-              <div className="text-[10px] text-slate-400">Balance: <span className="text-emerald-400 font-bold">{displayBalance} {accountInfo?.currency || ''}</span>{latency > 0 ? ` • ${latency}ms` : ''}</div>
-            </div>
+            
+            {accountInfo?.isAuthorized ? (
+              <button
+                type="button"
+                onClick={onOpenConnectDeriv}
+                className="font-mono text-xs min-w-[118px] text-left hover:opacity-85 transition cursor-pointer"
+                title="Manage connected Deriv account"
+              >
+                <div className="font-extrabold text-white truncate max-w-[145px] flex items-center gap-1.5">
+                  <span>{accountInfo.loginId}</span>
+                  <span
+                    className={`text-[8px] px-1.5 py-0.2 rounded font-bold uppercase ${
+                      accountInfo.loginId === 'VRTC-PRACTICE'
+                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
+                        : accountInfo.isVirtual
+                        ? 'bg-amber-400/20 text-amber-300'
+                        : 'bg-emerald-500/20 text-emerald-300'
+                    }`}
+                  >
+                    {accountInfo.loginId === 'VRTC-PRACTICE' ? 'PRACTICE' : actualMode}
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  Balance: <span className="text-emerald-400 font-bold">{displayBalance} {accountInfo?.currency || 'USD'}</span>{latency > 0 ? ` • ${latency}ms` : ''}
+                </div>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onOpenConnectDeriv}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-bold transition cursor-pointer shadow-sm"
+                title="Connect Deriv (API Token / Instant Demo)"
+              >
+                <Zap className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400/30" />
+                <span>CONNECT ACCOUNT</span>
+              </button>
+            )}
 
             <div className="flex items-center gap-1 rounded-lg bg-slate-950 p-0.5 border border-slate-800">
               <button
                 type="button"
                 onClick={() => selectTradingMode('DEMO')}
-                className={`px-2 py-1 rounded-md text-[9px] font-black font-mono transition ${accountInfo?.isAuthorized && actualMode === 'DEMO' ? 'bg-amber-400 text-slate-950' : 'text-amber-300 hover:bg-amber-400/15'}`}
-                title="Use your Deriv demo account"
+                className={`px-2 py-1 rounded-md text-[9px] font-black font-mono transition cursor-pointer ${accountInfo?.isAuthorized && actualMode === 'DEMO' ? 'bg-amber-400 text-slate-950' : 'text-amber-300 hover:bg-amber-400/15'}`}
+                title="Switch to Deriv DEMO account"
               >
                 DEMO
               </button>
               <button
                 type="button"
                 onClick={() => selectTradingMode('REAL')}
-                className={`px-2 py-1 rounded-md text-[9px] font-black font-mono transition ${accountInfo?.isAuthorized && actualMode === 'REAL' ? 'bg-emerald-500 text-slate-950' : 'text-emerald-300 hover:bg-emerald-500/15'}`}
-                title="Use your Deriv real account"
+                className={`px-2 py-1 rounded-md text-[9px] font-black font-mono transition cursor-pointer ${accountInfo?.isAuthorized && actualMode === 'REAL' ? 'bg-emerald-500 text-slate-950' : 'text-emerald-300 hover:bg-emerald-500/15'}`}
+                title="Switch to Deriv REAL account"
               >
                 REAL
               </button>
             </div>
 
             {accountInfo?.isAuthorized && (
-              <button onClick={() => derivService.logout()} className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10" title="Disconnect this Matrix account session">
+              <button onClick={() => derivService.logout()} className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer" title="Disconnect Deriv session">
                 <LogOut className="w-3.5 h-3.5" />
               </button>
             )}

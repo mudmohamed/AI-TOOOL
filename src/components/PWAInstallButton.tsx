@@ -125,7 +125,7 @@ export const PWAInstallButton: React.FC = () => {
                   <span>Desktop (Chrome, Edge, Brave, Opera)</span>
                 </div>
                 <p className="text-[11px] text-slate-400 pl-6 leading-relaxed">
-                  Look at the right side of your browser URL bar for the <strong>Install icon (⊕ or computer screen)</strong>, or click menu (⋮) &rarr; <strong>"Install Deriv Matrix..."</strong>
+                  Look at the right side of your browser URL bar for the <strong>Install icon (⊕ or computer screen)</strong>, or click menu (⋮) &rarr; <strong>"Install SKIPPER AI TOOL..."</strong>
                 </p>
               </div>
 

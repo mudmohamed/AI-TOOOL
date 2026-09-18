@@ -1,4 +1,4 @@
-const CACHE_NAME = 'deriv-matrix-v1';
+const CACHE_NAME = 'skipper-ai-tool-v1';
 const ASSETS_TO_CACHE = [
   '/',
   '/index.html',

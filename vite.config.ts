@@ -55,8 +55,24 @@ function aistudioMediaPlugin(): Plugin {
   };
 }
 
+function safeViteHmrPlugin(): Plugin {
+  return {
+    name: 'safe-vite-hmr-transport',
+    transform(code, id) {
+      if (id.includes('/node_modules/vite/dist/client/client.mjs') || id.includes('@vite/client')) {
+        return code.replace(
+          'this.transport.send(payload)',
+          'this.transport?.send ? this.transport.send(payload) : Promise.resolve()'
+        );
+      }
+      return null;
+    },
+  };
+}
+
 export default defineConfig(() => ({
   plugins: [
+    safeViteHmrPlugin(),
     react(),
     tailwindcss(),
     aistudioMediaPlugin(),
@@ -65,8 +81,8 @@ export default defineConfig(() => ({
       includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'icon.svg'],
       manifest: {
         id: '/',
-        name: 'Deriv Market Matrix & Recovery Terminal',
-        short_name: 'Deriv Matrix',
+        name: 'SKIPPER AI TOOL',
+        short_name: 'SKIPPER AI TOOL',
         description: 'Live Deriv WebSocket market analysis, proposal-based contract execution, settlement monitoring, and configurable recovery risk controls.',
         theme_color: '#090d16',
         background_color: '#090d16',
@@ -79,7 +95,7 @@ export default defineConfig(() => ({
           { src: '/pwa-maskable-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
-      devOptions: { enabled: true },
+      devOptions: { enabled: false },
     }),
   ],
   resolve: {

@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Deriv Market Matrix & Recovery Engine",
-  "short_name": "Deriv Matrix",
+  "name": "SKIPPER AI TOOL",
+  "short_name": "SKIPPER AI TOOL",
   "description": "Deriv WebSocket market analysis and authenticated proposal, buy, balance, and settlement monitoring with configurable recovery controls.",
   "start_url": "/",
   "scope": "/",

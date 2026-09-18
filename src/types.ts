@@ -50,6 +50,8 @@ export interface MarketAnalysis {
   overPct: number;
   underPct: number;
   consecutiveMatches: number;
+  // 10-period Simple Moving Average
+  sma10?: number;
   // Compatibility field: a 0-100 evidence/ranking score, not a predicted win rate.
   winScore: number;
   recommendedContract: 'MATCHES' | 'DIFFERS' | 'OVER' | 'UNDER' | 'RISE' | 'FALL';
@@ -89,18 +91,6 @@ export interface TradeRecord {
   // Actual settled profit from Deriv for completed contracts.
   profit: number;
   recoveryStep: number;
-}
-
-export interface SessionStats {
-  totalTrades: number;
-  wins: number;
-  losses: number;
-  netProfit: number;
-  consecutiveLosses: number;
-  cumulativeLoss: number;
-  peakDrawdown: number;
-  peakProfit?: number;
-  vaultedProfit?: number;
 }
 
 export interface RiskConfig {
@@ -180,35 +170,25 @@ export type BulkStrategyType =
   | 'OVER_UNDER_MOMENTUM'
   | 'MATCHES_SNIPER_WAVE';
 
-export interface AutoMatchesConfig {
-  market?: string;
-  maxStakeCap?: number;
-  fixedStakeMode?: boolean;
-  maxAllowedLosses?: number;
-  stake: number;
-  winAmount?: number;
-  expectedProfit?: number;
-  maxAcceptableLoss?: number;
-  nextTradeCondition?: 'FIXED_STAKE' | 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';
-  martingaleFactor?: number;
-  restartOnError?: boolean;
-  executionSpeed: 'FAST' | 'NORMAL';
-  targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS' | 'DIFFERS_SAFE_GROWTH';
-  customTargetDigit?: number;
-  contractMode?: 'MATCHES' | 'DIFFERS' | 'OVER_UNDER' | 'EVEN_ODD';
-  onlyWhenSignalConfirmed?: boolean;
-  minConfidenceThreshold?: number;
+export interface SessionStats {
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  netProfit: number;
+  consecutiveLosses: number;
+  cumulativeLoss: number;
+  peakDrawdown: number;
 }
 
 export interface BacktestConfig {
   symbol: string;
-  sampleTicks: number;
   strategy: 'DIFFERS_ACCOUNT_GROWER' | 'CONFIRMED_MATCHES_SNIPER' | 'OVER_UNDER_PROBABILITY' | 'REPEAT_DIGIT_MOMENTUM';
   contractMode: 'DIFFERS' | 'MATCHES' | 'UNDER' | 'OVER';
+  sampleTicks: number;
   stake: number;
   stakeMode: 'FIXED_STAKE' | 'SMART_RECOVERY' | 'MARTINGALE';
-  maxStakeCap: number;
   martingaleMultiplier: number;
+  maxStakeCap: number;
   maxAllowedLosses: number;
   takeProfit: number;
   stopLoss: number;
@@ -220,8 +200,8 @@ export interface BacktestTrade {
   tickIndex: number;
   quote: number;
   entryDigit: number;
-  targetDigit: number | string;
-  contractType: string;
+  targetDigit: number;
+  contractType: 'DIFFERS' | 'MATCHES' | 'UNDER' | 'OVER';
   exitPrice: number;
   exitDigit: number;
   won: boolean;
@@ -250,6 +230,30 @@ export interface BacktestResult {
   maxConsecutiveLosses: number;
   trades: BacktestTrade[];
   equityCurve: Array<{ trade: number; balance: number; profit: number }>;
+}
+
+export interface AutoMatchesConfig {
+  market?: string;
+  stake: number;
+  winAmount?: number;
+  expectedProfit?: number;
+  maxAcceptableLoss?: number;
+  nextTradeCondition?: 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN' | 'FIXED_STAKE';
+  martingaleFactor?: number;
+  restartOnError?: boolean;
+  executionSpeed: 'FAST' | 'NORMAL';
+  targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS';
+  customTargetDigit?: number;
+  // Safety & 24/7 Controls
+  stopConditionMode?: 'ONLY_MANUAL_OR_TARGET' | 'STOP_ON_MAX_LOSS';
+  profitShieldActive?: boolean;
+  profitLockEnabled?: boolean;
+  profitLockTarget?: number;
+  fixedStakeMode?: boolean;
+  maxStakeCap?: number;
+  maxAllowedLosses?: number;
+  contractMode?: 'DIFFERS' | 'OVER_UNDER' | 'MATCHES';
+  onlyWhenSignalConfirmed?: boolean;
 }
 
 export interface DBotXmlDefinition {

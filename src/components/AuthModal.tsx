@@ -46,7 +46,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setTimeout(() => {
       setIsLoading(false);
       const profile: UserProfile = {
-        id: 'usr_' + Math.random().toString(36).substring(2, 9),
+        id: 'usr_' + Date.now().toString(36) + '_' + performance.now().toString(36).replace('.', ''),
         email: email.trim(),
         fullName: mode === 'REGISTER' ? fullName : fullName || 'Mohamed Hoola',
         country: country,

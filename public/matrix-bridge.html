@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SKIPPER AI TOOL Account</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #020718;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .bridge-card {
+      width: min(440px, 100%);
+      background: #0e182e;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 20px;
+      padding: 24px 26px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+      text-align: left;
+    }
+    .bridge-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .green-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+      animation: pulse-dot 1.5s infinite alternate;
+    }
+    @keyframes pulse-dot {
+      from { opacity: 0.4; transform: scale(0.9); }
+      to { opacity: 1; transform: scale(1.1); }
+    }
+    .bridge-title {
+      font-weight: 800;
+      font-size: 16px;
+      color: #ffffff;
+      letter-spacing: -0.01em;
+    }
+    .bridge-desc {
+      color: #94a3b8;
+      font-size: 12.5px;
+      line-height: 1.55;
+      margin: 0 0 18px 0;
+    }
+    .bridge-status {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: #060d1d;
+      border: 1px solid #1e2d4d;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .bridge-status.success {
+      color: #34d399;
+      border-color: rgba(52, 211, 153, 0.4);
+      background: rgba(6, 78, 59, 0.25);
+    }
+    .bridge-status.error {
+      color: #fda4af;
+      border-color: rgba(244, 63, 94, 0.4);
+      background: rgba(136, 19, 55, 0.25);
+    }
+    .actions {
+      margin-top: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .btn {
+      width: 100%;
+      background: #10b981;
+      color: #020617;
+      border: none;
+      border-radius: 12px;
+      padding: 11px 16px;
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      font-family: ui-monospace, monospace;
+      transition: background 0.2s;
+      text-align: center;
+      text-decoration: none;
+      display: block;
+    }
+    .btn:hover {
+      background: #34d399;
+    }
+    .links {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 14px;
+      font-size: 11px;
+    }
+    .links a {
+      color: #38bdf8;
+      text-decoration: none;
+    }
+    .links a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="bridge-card">
+    <div class="bridge-header">
+      <span class="green-dot"></span>
+      <span class="bridge-title">SKIPPER AI TOOL Account</span>
+    </div>
+
+    <p class="bridge-desc">
+      Securing your REAL / DEMO trading session. You will be returned to the Matrix automatically when the account is ready.
+    </p>
+
+    <div id="status" class="bridge-status">
+      <span id="status-text">Opening account...</span>
+    </div>
+
+    <div id="actions-panel" class="actions" style="display: none;">
+      <a id="oauth-link" href="#" class="btn">
+        Log In with Deriv
+      </a>
+    </div>
+
+    <div class="links">
+      <a href="/" id="return-link">
+        Return to Matrix
+      </a>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const statusEl = document.getElementById('status');
+      const statusText = document.getElementById('status-text');
+      const actionsPanel = document.getElementById('actions-panel');
+      const oauthLink = document.getElementById('oauth-link');
+      const returnLink = document.getElementById('return-link');
+
+      const params = new URLSearchParams(window.location.search);
+      const mode = (params.get('mode') || 'real').toLowerCase() === 'demo' ? 'demo' : 'real';
+      const isReal = mode === 'real';
+
+      function setStatus(text, type) {
+        statusText.textContent = text;
+        statusEl.className = 'bridge-status' + (type ? ' ' + type : '');
+      }
+
+      function sendToOpener(payload) {
+        if (window.opener && window.opener !== window) {
+          try {
+            window.opener.postMessage({
+              type: 'DERIV_MATRIX_ACCOUNT',
+              account: payload.account,
+              available: payload.available || { demo: false, real: true },
+              ws_url: payload.ws_url
+            }, window.location.origin);
+            setStatus('Authorized! Returning to Matrix...', 'success');
+            setTimeout(function () {
+              try { window.close(); } catch (e) {}
+            }, 500);
+            return true;
+          } catch (err) {
+            console.warn('Could not post Deriv session to opener:', err);
+          }
+        }
+        return false;
+      }
+
+      function showLogin(message) {
+        setStatus(message || 'Deriv authorization required for REAL account.', '');
+        actionsPanel.style.display = 'flex';
+        const returnTo = '/matrix-bridge.html?mode=' + encodeURIComponent(mode);
+        oauthLink.href = '/api/deriv/oauth-start?return_to=' + encodeURIComponent(returnTo);
+        oauthLink.textContent = 'Log In with Deriv';
+      }
+
+      async function loadRealSession() {
+        const oauthError = params.get('oauth_error');
+        if (oauthError) {
+          showLogin(oauthError);
+          statusEl.className = 'bridge-status error';
+          return;
+        }
+
+        setStatus('Securing REAL Deriv session...', '');
+        actionsPanel.style.display = 'none';
+        try {
+          const response = await fetch('/api/deriv/session?mode=real', {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: { Accept: 'application/json' },
+            cache: 'no-store'
+          });
+          const payload = await response.json().catch(function () { return {}; });
+          if (!response.ok) {
+            showLogin(payload.error || 'Deriv sign-in required.');
+            return;
+          }
+          if (!payload.account || !payload.ws_url) {
+            showLogin('Deriv returned an incomplete account session. Please sign in again.');
+            return;
+          }
+
+          setStatus('Connected to ' + payload.account.account_id + '! Returning...', 'success');
+          const sent = sendToOpener(payload);
+          if (!sent) {
+            setStatus('Connected! Return to the Matrix to continue.', 'success');
+            returnLink.textContent = 'Go to SKIPPER AI TOOL →';
+          }
+        } catch (err) {
+          showLogin('Could not reach the Deriv session endpoint. Please try again.');
+          statusEl.className = 'bridge-status error';
+        }
+      }
+
+      if (!isReal) {
+        setTimeout(function () {
+          const practiceData = {
+            account: {
+              account_id: 'VRTC-DEMO',
+              token: 'demo-session',
+              account_type: 'demo',
+              currency: 'USD',
+              balance: 10000
+            },
+            available: { demo: true, real: true },
+            ws_url: ''
+          };
+          setStatus('DEMO account active! Returning...', 'success');
+          if (window.opener && window.opener !== window) {
+            try {
+              window.opener.postMessage({
+                type: 'DERIV_MATRIX_ACCOUNT',
+                account: practiceData.account,
+                available: practiceData.available
+              }, window.location.origin);
+              setTimeout(function () { try { window.close(); } catch (e) {} }, 500);
+              return;
+            } catch (e) {}
+          }
+          window.location.href = '/';
+        }, 400);
+        return;
+      }
+
+      loadRealSession();
+    })();
+  </script>
+</body>
+</html>
