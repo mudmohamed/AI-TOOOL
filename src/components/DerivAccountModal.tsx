@@ -72,28 +72,6 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleConnectOAuth = async () => {
-    setAuthError(null);
-    setSuccessMsg(null);
-    setIsSubmitting(true);
-    try {
-      const ok = await derivService.connectTradingAccount('REAL');
-      if (ok) {
-        onToggleAccountMode('REAL');
-        setSuccessMsg('Successfully connected to your Deriv REAL account.');
-        setTimeout(() => {
-          onClose();
-        }, 900);
-      } else {
-        setAuthError('Deriv sign-in was not completed. Please try again.');
-      }
-    } catch (err: any) {
-      setAuthError(err?.message || 'Could not connect to Deriv.');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
   const handleConnectToken = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAuthError(null);
@@ -140,7 +118,6 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
 
   const handleDisconnect = () => {
     derivService.disconnectTradingAccount();
-    void fetch('/api/deriv/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => undefined);
     onToggleAccountMode('DEMO');
     setTokenInput('');
     try {
@@ -294,37 +271,6 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
           {/* TAB 1: Real Account API Token Input */}
           {activeTab === 'REAL_TOKEN' && (
             <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-[#0e1628] border border-emerald-500/30 space-y-3">
-                <button
-                  id="connect-deriv-oauth-btn"
-                  type="button"
-                  onClick={handleConnectOAuth}
-                  disabled={isSubmitting}
-                  className="w-full py-3 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-mono font-black text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  {isSubmitting ? (
-                    <>
-                      <LoaderCircle className="w-4 h-4 animate-spin text-slate-950" />
-                      <span>CONNECTING TO DERIV...</span>
-                    </>
-                  ) : (
-                    <>
-                      <ShieldCheck className="w-4 h-4 text-slate-950" />
-                      <span>LOG IN WITH DERIV</span>
-                    </>
-                  )}
-                </button>
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Uses Deriv OAuth 2.0 + PKCE and an authenticated one-time WebSocket session. Your Deriv password never enters this app.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3 text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest">
-                <span className="h-px flex-1 bg-slate-800" />
-                <span>or use an API token</span>
-                <span className="h-px flex-1 bg-slate-800" />
-              </div>
-
               <div className="p-4 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-mono font-bold text-slate-200 flex items-center gap-1.5">
