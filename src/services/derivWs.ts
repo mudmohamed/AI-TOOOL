@@ -733,7 +733,8 @@ class DerivWebSocketService {
         ? localStorage.getItem('deriv_token_real')
         : localStorage.getItem('deriv_token_demo');
       if (savedToken) {
-        return this.authorize(savedToken);
+        const appId = this.getStoredAppId();
+        if (appId && appId !== '1089') return this.connectPatAccount(savedToken, appId, requestedMode);
       }
     } catch {}
 
@@ -787,8 +788,7 @@ class DerivWebSocketService {
             finish(false);
             return;
           }
-          this.applyBridgeAccount(account, available, wsUrl);
-          finish(true);
+          void this.applyBridgeAccount(account, available, wsUrl).then(finish);
           return;
         }
         if (data.type === 'DERIV_MATRIX_ACCOUNT_ERROR') {
@@ -806,7 +806,7 @@ class DerivWebSocketService {
     });
   }
 
-  private applyBridgeAccount(account: any, available: any, wsUrl: string): void {
+  private applyBridgeAccount(account: any, available: any, wsUrl: string): Promise<boolean> {
     const isVirtual = String(account.account_type || '').toLowerCase() === 'demo';
     const currency = account.currency || 'USD';
     const accountsList: NonNullable<DerivAccountInfo['accountsList']> = [];
@@ -832,58 +832,75 @@ class DerivWebSocketService {
     };
     this.resetAllMatchesRecovery();
     this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
-    this.openAccountSocket(wsUrl);
+    return this.openAccountSocket(wsUrl);
   }
 
-  private openAccountSocket(url: string): void {
-    this.intentionalAccountClose = true;
-    if (this.accountWs) {
-      try {
-        this.accountWs.onclose = null;
-        this.accountWs.close();
-      } catch {}
-    }
-    this.intentionalAccountClose = false;
-
-    const ws = new WebSocket(url);
-    this.accountWs = ws;
-
-    ws.onopen = () => {
-      if (this.accountWs !== ws) return;
-      this.sendAccount({ balance: 1, subscribe: 1, req_id: this.nextPrivateReqId() });
-      this.notifyHandlers({ msg_type: 'account_connection_status', connected: true });
-      this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
-    };
-
-    ws.onmessage = (event: MessageEvent) => {
-      if (this.accountWs !== ws) return;
-      try {
-        const data = JSON.parse(event.data);
-        this.handleAccountIncomingMessage(data);
-      } catch (error) {
-        console.error('Error parsing Deriv account WebSocket message:', error);
+  private openAccountSocket(url: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      this.intentionalAccountClose = true;
+      if (this.accountWs) {
+        try {
+          this.accountWs.onclose = null;
+          this.accountWs.close();
+        } catch {}
       }
-    };
+      this.intentionalAccountClose = false;
 
-    ws.onerror = (error) => {
-      if (this.accountWs !== ws) return;
-      console.warn('Deriv account WebSocket connection error:', error);
-      this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
-    };
+      const ws = new WebSocket(url);
+      this.accountWs = ws;
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const timer = setTimeout(() => {
+        this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv authenticated WebSocket timed out.' });
+        finish(false);
+      }, 15000);
 
-    ws.onclose = () => {
-      if (this.accountWs !== ws) return;
-      this.accountWs = null;
-      this.proposalRequests.clear();
-      this.buyRequests.clear();
-      this.proposalMeta.clear();
-      this.openContracts.clear();
-      this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
-      if (!this.intentionalAccountClose) {
-        this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
+      ws.onopen = () => {
+        if (this.accountWs !== ws) return;
+        this.sendAccount({ balance: 1, subscribe: 1, req_id: this.nextPrivateReqId() });
+        this.notifyHandlers({ msg_type: 'account_connection_status', connected: true });
         this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
-      }
-    };
+        finish(true);
+      };
+
+      ws.onmessage = (event: MessageEvent) => {
+        if (this.accountWs !== ws) return;
+        try {
+          const data = JSON.parse(event.data);
+          this.handleAccountIncomingMessage(data);
+        } catch (error) {
+          console.error('Error parsing Deriv account WebSocket message:', error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        if (this.accountWs !== ws) return;
+        console.warn('Deriv account WebSocket connection error:', error);
+        this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
+        this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv rejected or closed the authenticated WebSocket session.' });
+        finish(false);
+      };
+
+      ws.onclose = () => {
+        if (this.accountWs !== ws) return;
+        this.accountWs = null;
+        this.proposalRequests.clear();
+        this.buyRequests.clear();
+        this.proposalMeta.clear();
+        this.openContracts.clear();
+        this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
+        if (!this.intentionalAccountClose) {
+          this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
+          this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+        }
+        finish(false);
+      };
+    });
   }
 
   private handleAccountIncomingMessage(data: any): void {
@@ -1083,6 +1100,71 @@ class DerivWebSocketService {
       msg_type: 'auth_error',
       error: 'Please select DEMO or REAL in the Trading Account modal.',
     });
+  }
+
+  public async connectPatAccount(token: string, appId: string, mode: AccountMode = 'REAL'): Promise<boolean> {
+    const cleanToken = token ? token.trim() : '';
+    const cleanAppId = appId ? appId.trim() : '';
+
+    if (!cleanToken) {
+      this.notifyHandlers({ msg_type: 'auth_error', error: 'Please enter a valid Deriv Personal Access Token.' });
+      return false;
+    }
+    if (!cleanAppId || cleanAppId === '1089') {
+      this.notifyHandlers({
+        msg_type: 'auth_error',
+        error: 'Enter the App ID from your PAT application in the Deriv developer dashboard. Legacy App ID 1089 cannot authenticate the current PAT API.',
+      });
+      return false;
+    }
+
+    try {
+      const response = await fetch('/api/deriv/pat-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: cleanToken,
+          app_id: cleanAppId,
+          mode: mode === 'DEMO' ? 'demo' : 'real',
+        }),
+      });
+      const payload = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        const message = String(payload?.error || 'Deriv account authentication failed.');
+        this.notifyHandlers({ msg_type: 'auth_error', error: message });
+        return false;
+      }
+
+      const wsUrl = String(payload?.ws_url || '');
+      const account = payload?.account || {};
+      if (!wsUrl.startsWith('wss://') || !account?.account_id) {
+        this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv returned an incomplete authenticated session.' });
+        return false;
+      }
+
+      this.setStoredAppId(cleanAppId);
+      try {
+        localStorage.setItem('deriv_token', cleanToken);
+        if (mode === 'DEMO') localStorage.setItem('deriv_token_demo', cleanToken);
+        else localStorage.setItem('deriv_token_real', cleanToken);
+      } catch {}
+
+      const ok = await this.applyBridgeAccount(
+        { ...account, token: cleanToken },
+        payload?.available || {},
+        wsUrl,
+      );
+
+      if (ok) {
+        this.notifyHandlers({ msg_type: 'auth_success', account: this.accountInfo });
+      }
+      return ok;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to connect to Deriv.';
+      this.notifyHandlers({ msg_type: 'auth_error', error: message });
+      return false;
+    }
   }
 
   public authorize(token: string): Promise<boolean> {
