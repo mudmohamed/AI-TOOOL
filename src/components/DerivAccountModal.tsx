@@ -78,18 +78,19 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
     setSuccessMsg(null);
 
     const cleanToken = tokenInput.trim();
+    const cleanAppId = customAppId.trim();
     if (!cleanToken) {
-      setAuthError('Please paste your Deriv API Token.');
+      setAuthError('Please paste your Deriv Personal Access Token.');
+      return;
+    }
+    if (!cleanAppId || cleanAppId === '1089') {
+      setAuthError('Enter the App ID from your PAT application in the Deriv developer dashboard. App ID 1089 is a legacy ID and cannot authenticate the current PAT API.');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      if (customAppId.trim()) {
-        derivService.setStoredAppId(customAppId.trim());
-      }
-
-      const ok = await derivService.authorize(cleanToken);
+      const ok = await derivService.connectPatAccount(cleanToken, cleanAppId, 'REAL');
       if (ok) {
         onToggleAccountMode('REAL');
         setSuccessMsg(`Successfully connected to Deriv REAL Account (${accountInfo.loginId || 'Live'})!`);
@@ -97,7 +98,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
           onClose();
         }, 1200);
       } else {
-        setAuthError('Authentication failed. Please verify that your token has "Read" and "Trade" scopes enabled.');
+        setAuthError('Authentication failed. Check the PAT App ID, token, and that the token has the trade permission.');
       }
     } catch (err: any) {
       setAuthError(err?.message || 'Connection error. Please check your token and network.');
@@ -272,6 +273,27 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
           {activeTab === 'REAL_TOKEN' && (
             <div className="space-y-4">
               <div className="p-4 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-3">
+                <label className="text-xs font-mono font-bold text-slate-200 flex items-center gap-1.5">
+                  <Settings className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>DERIV PAT APP ID (REQUIRED)</span>
+                </label>
+                <input
+                  id="deriv-pat-app-id-input"
+                  type="text"
+                  inputMode="numeric"
+                  value={customAppId}
+                  onChange={(e) => setCustomAppId(e.target.value)}
+                  placeholder="Paste the App ID from your PAT application"
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-950 border border-slate-700/80 focus:border-cyan-500 focus:outline-none text-xs text-white font-mono placeholder:text-slate-500 transition shadow-inner"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  Use the App ID from a <strong className="text-cyan-300">PAT application</strong> registered in the Deriv developer dashboard. Legacy App ID 1089 is not used for this login.
+                </p>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-mono font-bold text-slate-200 flex items-center gap-1.5">
                     <Key className="w-3.5 h-3.5 text-emerald-400" />
@@ -314,7 +336,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
                   <button
                     id="connect-real-account-submit-btn"
                     type="submit"
-                    disabled={isSubmitting || !tokenInput.trim()}
+                    disabled={isSubmitting || !tokenInput.trim() || !customAppId.trim() || customAppId.trim() === '1089'}
                     className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-mono font-black text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
                   >
                     {isSubmitting ? (
@@ -338,41 +360,24 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
                   <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px]">
                     ?
                   </span>
-                  <span>How to get your Deriv API Token in 30 seconds:</span>
+                  <span>Current Deriv PAT login:</span>
                 </div>
                 <ol className="space-y-2 text-slate-400 pl-2 leading-relaxed font-sans">
                   <li className="flex items-start gap-2">
                     <span className="text-emerald-400 font-mono font-bold">1.</span>
                     <span>
-                      Open{' '}
-                      <a
-                        href="https://app.deriv.com/account/api-token"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-emerald-400 underline font-mono"
-                      >
-                        app.deriv.com/account/api-token
-                      </a>{' '}
-                      (or go to <strong>Manage account &gt; Security &gt; API token</strong>).
+                      Sign in to <a href="https://developers.deriv.com" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline font-mono">developers.deriv.com</a>, register a <strong>PAT</strong> application, and paste its App ID above.
                     </span>
                   </li>
                   <li className="flex items-start gap-2">
                     <span className="text-emerald-400 font-mono font-bold">2.</span>
                     <span>
-                      Select scopes:{' '}
-                      <strong className="text-emerald-300 font-mono bg-emerald-500/10 px-1 py-0.5 rounded border border-emerald-500/20">
-                        Read
-                      </strong>{' '}
-                      and{' '}
-                      <strong className="text-emerald-300 font-mono bg-emerald-500/10 px-1 py-0.5 rounded border border-emerald-500/20">
-                        Trade
-                      </strong>
-                      . (Both are required to view balance and place trades).
+                      Generate a Personal Access Token for that application with the <strong className="text-emerald-300 font-mono bg-emerald-500/10 px-1 py-0.5 rounded border border-emerald-500/20">trade</strong> permission.
                     </span>
                   </li>
                   <li className="flex items-start gap-2">
                     <span className="text-emerald-400 font-mono font-bold">3.</span>
-                    <span>Enter any name (e.g. <em>Matrix</em>), click <strong>Create</strong>, copy the token and paste it above.</span>
+                    <span>Paste that PAT above and press <strong>CONNECT REAL ACCOUNT</strong>. SKIPPER requests a one-time authenticated Deriv WebSocket URL for your real Options account.</span>
                   </li>
                 </ol>
               </div>
@@ -381,7 +386,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
               <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start gap-2 text-xs text-emerald-300 leading-relaxed">
                 <Lock className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                 <span>
-                  Your token is stored only in your local browser storage and connects directly to Deriv's official secure WebSocket (<code className="font-mono text-white">wss://ws.derivws.com</code>).
+                  Your token stays in your browser storage. During login it is sent over HTTPS to this site's serverless connection route only to request Deriv's short-lived authenticated WebSocket URL; the route does not persist the token.
                 </span>
               </div>
             </div>
@@ -424,7 +429,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
               <div>
                 <h3 className="text-sm font-bold text-white font-mono">DERIV DEVELOPER APP ID</h3>
                 <p className="text-xs text-slate-400 leading-relaxed mt-1">
-                  Deriv uses App ID <code className="text-cyan-300 font-mono">1089</code> by default for official WebSocket data. If you registered a custom application on <a href="https://api.deriv.com" target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">api.deriv.com</a>, you can specify your App ID below.
+                  Current Deriv PAT authentication requires the App ID from a PAT application registered in the Deriv developer dashboard. The old legacy App ID 1089 is not used for this authenticated real-account flow.
                 </p>
               </div>
 
@@ -434,7 +439,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
                   type="text"
                   value={customAppId}
                   onChange={(e) => setCustomAppId(e.target.value)}
-                  placeholder="e.g. 1089 or your registered App ID"
+                  placeholder="Your PAT application App ID"
                   className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
                 />
               </div>
