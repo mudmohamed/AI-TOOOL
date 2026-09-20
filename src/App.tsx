@@ -638,10 +638,11 @@ export default function App() {
           autoDispatchLockRef.current = false;
           const symbol = currentSymbolRef.current;
           const livePrice = derivService.getCurrentPrice(symbol);
+          const cachedDigits = marketTickDataRef.current[symbol]?.digits || [];
           const liveDigit =
             livePrice !== undefined
               ? derivService.extractLastDigit(livePrice, symbol)
-              : lastDigitRef.current;
+              : (cachedDigits.length ? cachedDigits[cachedDigits.length - 1] : 0);
 
           if (autoMatchesActiveRef.current) {
             dispatchNextAutoTradeRef.current?.(livePrice, liveDigit);
