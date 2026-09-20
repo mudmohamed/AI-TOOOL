@@ -741,16 +741,11 @@ class DerivWebSocketService {
   public async connectTradingAccount(mode: AccountMode): Promise<boolean> {
     if (typeof window === 'undefined') return false;
 
-    if (mode === 'DEMO') {
-      this.startVirtualPracticeSession();
-      return true;
-    }
-
     try {
       const accessToken = localStorage.getItem('deriv_oauth_access_token_real') || '';
       const oauthExpiry = Number(localStorage.getItem('deriv_oauth_expires_at') || 0);
       if (accessToken && oauthExpiry > Date.now() + 15000) {
-        return this.connectOAuthAccount(accessToken, 'REAL');
+        return this.connectOAuthAccount(accessToken, mode);
       }
     } catch {}
 
@@ -818,7 +813,7 @@ class DerivWebSocketService {
       } catch {
         this.notifyHandlers({
           msg_type: 'auth_error',
-          error: 'Could not restore the Deriv REAL trading connection.',
+          error: 'Could not restore the Deriv authenticated trading connection.',
         });
       }
     }, 1200);
@@ -888,7 +883,7 @@ class DerivWebSocketService {
           clearTimeout(this.accountReconnectTimeout);
           this.accountReconnectTimeout = null;
         }
-        this.isPracticeSession = Boolean(this.accountInfo.isVirtual);
+        this.isPracticeSession = false;
         this.sendAccount({ balance: 1, subscribe: 1, req_id: this.nextPrivateReqId() });
         this.notifyHandlers({ msg_type: 'account_connection_status', connected: true });
         this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
@@ -1098,25 +1093,20 @@ class DerivWebSocketService {
 
   public switchAccount(loginId: string): void {
     const upper = String(loginId || '').toUpperCase();
-    const isVirtualTarget = upper === 'DEMO' || upper.startsWith('VR');
-
-    if (isVirtualTarget) {
-      this.startVirtualPracticeSession();
-      return;
-    }
+    const mode: AccountMode = upper === 'DEMO' || upper.startsWith('VR') ? 'DEMO' : 'REAL';
 
     try {
       const accessToken = localStorage.getItem('deriv_oauth_access_token_real') || '';
       const oauthExpiry = Number(localStorage.getItem('deriv_oauth_expires_at') || 0);
       if (accessToken && oauthExpiry > Date.now() + 15000) {
-        void this.connectOAuthAccount(accessToken, 'REAL');
+        void this.connectOAuthAccount(accessToken, mode);
         return;
       }
     } catch {}
 
     const clientId = this.getStoredOAuthClientId();
     if (clientId) {
-      void this.beginOAuthLogin(clientId);
+      void this.beginOAuthLogin(clientId, mode);
       return;
     }
 
@@ -1125,7 +1115,6 @@ class DerivWebSocketService {
       error: 'Deriv connection is not available on this deployment.',
     });
   }
-
 
   public async connectOAuthAccount(token: string, mode: AccountMode = 'REAL'): Promise<boolean> {
     const cleanToken = token ? token.trim() : '';
