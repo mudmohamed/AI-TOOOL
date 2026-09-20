@@ -131,7 +131,9 @@ class DerivWebSocketService {
     this.connect();
     this.startSimulationFallback();
     if (typeof window !== 'undefined') {
-      this.checkUrlForOAuthTokens();
+      const search = new URLSearchParams(window.location.search);
+      const hasModernOAuthCallback = search.has('code') || search.has('error');
+      void this.checkUrlForOAuthTokens();
 
       // Keep PAT sessions on Deriv's current REST account -> OTP -> authenticated
       // WebSocket flow. Never feed a stored PAT into the legacy WebSocket authorize call.
@@ -145,8 +147,7 @@ class DerivWebSocketService {
         }
       });
 
-      // This message listener is retained only for the legacy OAuth/matrix bridge.
-      // PAT login does not use this event path; it calls connectPatAccount directly.
+      // Retained only for the legacy matrix bridge. Modern OAuth never uses this path.
       window.addEventListener('message', (event) => {
         const data = event.data || {};
         if (data.type === 'DERIV_MATRIX_ACCOUNT' && data.account?.token) {
@@ -154,39 +155,124 @@ class DerivWebSocketService {
         }
       });
 
-      try {
-        const savedToken = localStorage.getItem('deriv_token_real');
-        const appId = this.getStoredAppId();
-        if (savedToken && appId && appId !== '1089') {
-          setTimeout(() => {
-            if (!this.accountInfo.isAuthorized || this.isPracticeSession) {
-              void this.connectPatAccount(savedToken, appId, 'REAL');
+      if (!hasModernOAuthCallback) {
+        try {
+          const oauthToken = localStorage.getItem('deriv_oauth_access_token_real') || '';
+          const oauthExpiry = Number(localStorage.getItem('deriv_oauth_expires_at') || 0);
+          if (oauthToken && oauthExpiry > Date.now() + 15000) {
+            setTimeout(() => {
+              if (!this.accountInfo.isAuthorized || this.isPracticeSession) {
+                void this.connectOAuthAccount(oauthToken, 'REAL');
+              }
+            }, 350);
+          } else {
+            if (oauthToken || oauthExpiry) {
+              localStorage.removeItem('deriv_oauth_access_token_real');
+              localStorage.removeItem('deriv_oauth_expires_at');
             }
-          }, 600);
-        } else {
-          // Keep the app usable without silently attempting obsolete PAT authorization.
+            const savedToken = localStorage.getItem('deriv_token_real');
+            const appId = this.getStoredAppId();
+            if (savedToken && appId && appId !== '1089') {
+              setTimeout(() => {
+                if (!this.accountInfo.isAuthorized || this.isPracticeSession) {
+                  void this.connectPatAccount(savedToken, appId, 'REAL');
+                }
+              }, 600);
+            } else {
+              this.startVirtualPracticeSession();
+            }
+          }
+        } catch {
           this.startVirtualPracticeSession();
         }
-      } catch {
-        this.startVirtualPracticeSession();
       }
     }
   }
 
-  public checkUrlForOAuthTokens(): void {
+  public async checkUrlForOAuthTokens(): Promise<void> {
     if (typeof window === 'undefined') return;
     try {
       const search = new URLSearchParams(window.location.search);
       const hashRaw = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash;
       const hash = new URLSearchParams(hashRaw);
 
+      // Current Deriv OAuth2 Authorization Code + PKCE callback.
+      const oauthCode = search.get('code');
+      const oauthState = search.get('state');
+      const oauthError = search.get('error');
+      if (oauthError) {
+        const description = search.get('error_description') || 'Deriv login was cancelled or rejected.';
+        this.notifyHandlers({ msg_type: 'auth_error', error: description });
+        try { window.history.replaceState({}, document.title, window.location.pathname); } catch {}
+        return;
+      }
+
+      if (oauthCode) {
+        const expectedState = sessionStorage.getItem('deriv_oauth_state') || '';
+        const codeVerifier = sessionStorage.getItem('deriv_oauth_code_verifier') || '';
+        const clientId = sessionStorage.getItem('deriv_oauth_client_id') || this.getStoredOAuthClientId();
+        const redirectUri = sessionStorage.getItem('deriv_oauth_redirect_uri') || `${window.location.origin}/`;
+
+        if (!oauthState || !expectedState || oauthState !== expectedState) {
+          this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv OAuth security check failed. Please start the login again.' });
+          return;
+        }
+        if (!codeVerifier || !clientId) {
+          this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv OAuth session expired. Please press LOGIN WITH DERIV again.' });
+          return;
+        }
+
+        const response = await fetch('/api/deriv/oauth-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code: oauthCode,
+            clientId,
+            codeVerifier,
+            redirectUri,
+          }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload?.access_token) {
+          const message =
+            payload?.error_description ||
+            payload?.error?.message ||
+            payload?.message ||
+            'Deriv OAuth token exchange failed.';
+          this.notifyHandlers({ msg_type: 'auth_error', error: String(message) });
+          return;
+        }
+
+        const accessToken = String(payload.access_token);
+        const expiresIn = Math.max(60, Number(payload.expires_in || 3600));
+        try {
+          localStorage.setItem('deriv_oauth_access_token_real', accessToken);
+          localStorage.setItem('deriv_oauth_expires_at', String(Date.now() + expiresIn * 1000));
+          localStorage.removeItem('deriv_virtual_practice');
+          sessionStorage.removeItem('deriv_oauth_state');
+          sessionStorage.removeItem('deriv_oauth_code_verifier');
+          sessionStorage.removeItem('deriv_oauth_client_id');
+          sessionStorage.removeItem('deriv_oauth_redirect_uri');
+        } catch {}
+        try { window.history.replaceState({}, document.title, window.location.pathname); } catch {}
+
+        const ok = await this.connectOAuthAccount(accessToken, 'REAL');
+        if (!ok) {
+          try {
+            localStorage.removeItem('deriv_oauth_access_token_real');
+            localStorage.removeItem('deriv_oauth_expires_at');
+          } catch {}
+        }
+        return;
+      }
+
+      // Legacy token callback retained only for old registered Deriv applications.
       const token1 = search.get('token1') || hash.get('token1') || search.get('token') || hash.get('token');
       const acct1 = search.get('acct1') || hash.get('acct1') || search.get('acct') || hash.get('acct');
       const cur1 = search.get('cur1') || hash.get('cur1') || search.get('cur') || hash.get('cur') || 'USD';
 
       if (token1) {
         const resolvedAcct = acct1 || (token1.startsWith('a1-') ? 'VRTC_OAUTH' : 'CR_OAUTH');
-        // Store all accounts returned in query
         for (let i = 1; i <= 10; i += 1) {
           const t = search.get(`token${i}`) || hash.get(`token${i}`);
           const a = search.get(`acct${i}`) || hash.get(`acct${i}`);
@@ -204,7 +290,6 @@ class DerivWebSocketService {
           localStorage.removeItem('deriv_virtual_practice');
         } catch {}
 
-        // If opened inside popup window, send account back to opener and close
         if (window.opener && window.opener !== window) {
           try {
             window.opener.postMessage(
@@ -216,10 +301,7 @@ class DerivWebSocketService {
                   account_type: resolvedAcct.toUpperCase().startsWith('VR') ? 'demo' : 'real',
                   currency: cur1,
                 },
-                available: {
-                  demo: true,
-                  real: true,
-                },
+                available: { demo: true, real: true },
               },
               '*',
             );
@@ -230,19 +312,15 @@ class DerivWebSocketService {
           } catch {}
         }
 
-        // Otherwise authorize in current window
         void this.authorize(token1);
-
-        // Clean query parameters from URL bar without reloading
-        try {
-          const cleanUrl = window.location.pathname;
-          window.history.replaceState({}, document.title, cleanUrl);
-        } catch {}
+        try { window.history.replaceState({}, document.title, window.location.pathname); } catch {}
       }
     } catch (e) {
-      console.warn('Deriv URL token parse warning:', e);
+      const message = e instanceof Error ? e.message : 'Deriv OAuth callback failed.';
+      this.notifyHandlers({ msg_type: 'auth_error', error: message });
     }
   }
+
 
   private nextPrivateReqId(): number {
     this.privateReqId += 1;
@@ -1089,9 +1167,15 @@ class DerivWebSocketService {
       return;
     }
 
-    // Target is REAL account. PAT authentication must use the current
-    // REST account lookup -> OTP -> authenticated WebSocket flow.
+    // REAL account: prefer the current OAuth2 session, then PAT fallback.
     try {
+      const oauthToken = localStorage.getItem('deriv_oauth_access_token_real') || '';
+      const oauthExpiry = Number(localStorage.getItem('deriv_oauth_expires_at') || 0);
+      if (oauthToken && oauthExpiry > Date.now() + 15000) {
+        void this.connectOAuthAccount(oauthToken, 'REAL');
+        return;
+      }
+
       const savedToken =
         localStorage.getItem('deriv_token_real') ||
         localStorage.getItem(`deriv_token_${loginId}`);
@@ -1104,9 +1188,130 @@ class DerivWebSocketService {
 
     this.notifyHandlers({
       msg_type: 'auth_error',
-      error: 'Open Trading Account > Real Account and enter your PAT App ID and Deriv Personal Access Token.',
+      error: 'Open Trading Account > Real Account and press LOGIN WITH DERIV.',
     });
   }
+
+  public async connectOAuthAccount(token: string, mode: AccountMode = 'REAL'): Promise<boolean> {
+    const cleanToken = token ? token.trim() : '';
+    if (!cleanToken) {
+      this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv OAuth session is missing. Please log in again.' });
+      return false;
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${cleanToken}`,
+      Accept: 'application/json',
+    };
+
+    const accountIdOf = (account: any): string =>
+      String(account?.account_id || account?.loginid || account?.login_id || account?.id || '').trim();
+
+    const isDemoAccount = (account: any): boolean => {
+      const type = String(account?.account_type || account?.type || account?.accountType || '').toLowerCase();
+      const id = accountIdOf(account).toUpperCase();
+      return Boolean(account?.is_virtual) || type === 'demo' || type === 'virtual' || id.startsWith('VRTC');
+    };
+
+    const derivError = (payload: any, fallback: string): string => {
+      const first = Array.isArray(payload?.errors) ? payload.errors[0] : null;
+      return String(
+        first?.detail?.message ||
+        first?.message ||
+        payload?.error?.message ||
+        payload?.message ||
+        fallback,
+      );
+    };
+
+    try {
+      const accountsResponse = await fetch('https://api.derivws.com/trading/v1/options/accounts', {
+        method: 'GET',
+        headers,
+      });
+      const accountsPayload = await accountsResponse.json().catch(() => ({}));
+      if (!accountsResponse.ok) {
+        this.notifyHandlers({
+          msg_type: 'auth_error',
+          error: derivError(accountsPayload, 'Deriv rejected the OAuth session. Please log in again.'),
+        });
+        return false;
+      }
+
+      const raw =
+        (Array.isArray(accountsPayload?.data) && accountsPayload.data) ||
+        (Array.isArray(accountsPayload?.data?.accounts) && accountsPayload.data.accounts) ||
+        (Array.isArray(accountsPayload?.accounts) && accountsPayload.accounts) ||
+        [];
+
+      const accounts = raw.filter((account: any) => accountIdOf(account));
+      const realAccounts = accounts.filter((account: any) => !isDemoAccount(account));
+      const demoAccounts = accounts.filter((account: any) => isDemoAccount(account));
+      const selected = mode === 'REAL' ? realAccounts[0] : demoAccounts[0];
+
+      if (!selected) {
+        this.notifyHandlers({
+          msg_type: 'auth_error',
+          error: mode === 'REAL'
+            ? 'No Deriv real Options account was found for this login.'
+            : 'No Deriv demo Options account was found for this login.',
+        });
+        return false;
+      }
+
+      const accountId = accountIdOf(selected);
+      const otpResponse = await fetch(
+        `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
+        { method: 'POST', headers },
+      );
+      const otpPayload = await otpResponse.json().catch(() => ({}));
+      if (!otpResponse.ok) {
+        this.notifyHandlers({
+          msg_type: 'auth_error',
+          error: derivError(otpPayload, 'Deriv could not create the authenticated WebSocket session.'),
+        });
+        return false;
+      }
+
+      const wsUrl = String(
+        otpPayload?.data?.url ||
+        otpPayload?.data?.ws_url ||
+        otpPayload?.url ||
+        otpPayload?.ws_url ||
+        '',
+      );
+      if (!wsUrl.startsWith('wss://api.derivws.com/')) {
+        this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv returned an invalid authenticated WebSocket URL.' });
+        return false;
+      }
+
+      const balanceValue =
+        typeof selected?.balance === 'object'
+          ? selected.balance?.balance ?? selected.balance?.amount
+          : selected?.balance;
+      const account = {
+        account_id: accountId,
+        account_type: isDemoAccount(selected) ? 'demo' : 'real',
+        currency: selected?.currency || 'USD',
+        balance: Number(balanceValue || 0),
+      };
+
+      // Do not pass the OAuth access token into applyBridgeAccount; that method stores
+      // legacy/PAT tokens for reconnect. OAuth has its own isolated storage keys.
+      const ok = await this.applyBridgeAccount(
+        account,
+        { demo: demoAccounts.length > 0, real: realAccounts.length > 0 },
+        wsUrl,
+      );
+      if (ok) this.notifyHandlers({ msg_type: 'auth_success', account: this.accountInfo });
+      return ok;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unable to connect the Deriv OAuth account.';
+      this.notifyHandlers({ msg_type: 'auth_error', error: message });
+      return false;
+    }
+  }
+
 
   public async connectPatAccount(token: string, appId: string, mode: AccountMode = 'REAL'): Promise<boolean> {
     const cleanToken = token ? token.trim() : '';
@@ -1423,6 +1628,8 @@ class DerivWebSocketService {
       localStorage.removeItem('deriv_token');
       localStorage.removeItem('deriv_token_demo');
       localStorage.removeItem('deriv_token_real');
+      localStorage.removeItem('deriv_oauth_access_token_real');
+      localStorage.removeItem('deriv_oauth_expires_at');
       localStorage.removeItem('deriv_virtual_practice');
     } catch {}
     this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
@@ -1445,6 +1652,64 @@ class DerivWebSocketService {
     } catch {}
   }
 
+  public getStoredOAuthClientId(): string {
+    try {
+      return localStorage.getItem('deriv_oauth_client_id') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  public setStoredOAuthClientId(clientId: string): void {
+    try {
+      const clean = clientId.trim();
+      if (clean) localStorage.setItem('deriv_oauth_client_id', clean);
+      else localStorage.removeItem('deriv_oauth_client_id');
+    } catch {}
+  }
+
+  public async beginOAuthLogin(clientId?: string): Promise<void> {
+    if (typeof window === 'undefined') return;
+    const cleanClientId = (clientId || this.getStoredOAuthClientId()).trim();
+    if (!cleanClientId) {
+      this.notifyHandlers({
+        msg_type: 'auth_error',
+        error: 'Enter the OAuth App ID from your Deriv developer application.',
+      });
+      return;
+    }
+
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+    const bytes = crypto.getRandomValues(new Uint8Array(64));
+    const codeVerifier = Array.from(bytes, (value) => alphabet[value % alphabet.length]).join('');
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(codeVerifier));
+    const codeChallenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '');
+    const stateBytes = crypto.getRandomValues(new Uint8Array(16));
+    const state = Array.from(stateBytes, (value) => value.toString(16).padStart(2, '0')).join('');
+    const redirectUri = `${window.location.origin}/`;
+
+    this.setStoredOAuthClientId(cleanClientId);
+    sessionStorage.setItem('deriv_oauth_code_verifier', codeVerifier);
+    sessionStorage.setItem('deriv_oauth_state', state);
+    sessionStorage.setItem('deriv_oauth_client_id', cleanClientId);
+    sessionStorage.setItem('deriv_oauth_redirect_uri', redirectUri);
+
+    const url = new URL('https://auth.deriv.com/oauth2/auth');
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('client_id', cleanClientId);
+    url.searchParams.set('redirect_uri', redirectUri);
+    url.searchParams.set('scope', 'trade');
+    url.searchParams.set('state', state);
+    url.searchParams.set('code_challenge', codeChallenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+
+    window.location.assign(url.toString());
+  }
+
+  // Kept for old apps only. New SKIPPER real login uses beginOAuthLogin().
   public getOAuthUrl(appId?: string): string {
     const id = appId || this.getStoredAppId() || '1089';
     return `https://oauth.deriv.com/oauth2/authorize?app_id=${id}&l=EN&brand=deriv`;
@@ -1453,20 +1718,9 @@ class DerivWebSocketService {
   public openOAuthLogin(appId?: string): Window | null {
     const url = this.getOAuthUrl(appId);
     if (typeof window === 'undefined') return null;
-    const width = 540;
-    const height = 750;
-    const left = window.screenX + (window.outerWidth - width) / 2;
-    const top = window.screenY + (window.outerHeight - height) / 2;
-    const popup = window.open(
-      url,
-      'deriv_oauth_window',
-      `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,status=yes`,
-    );
-    if (popup) {
-      popup.focus();
-    }
-    return popup;
+    return window.open(url, 'deriv_oauth_window', 'width=540,height=750,resizable=yes,scrollbars=yes,status=yes');
   }
+
 
   public startVirtualPracticeSession(initialBalance = 10000): void {
     this.isPracticeSession = true;
