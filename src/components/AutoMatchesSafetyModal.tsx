@@ -44,6 +44,7 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
         id="auto-matches-safety-modal"
         className="w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl overflow-hidden space-y-4"
       >
+        {/* Modal Header with Warning Icon */}
         <div className="p-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-full bg-blue-600 text-yellow-300 flex items-center justify-center shadow-lg shadow-blue-900/50">
@@ -67,12 +68,16 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
           </button>
         </div>
 
+        {/* Modal Body */}
         <div className="p-5 space-y-4 text-xs font-sans">
+          {/* Current Session Stats */}
           <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono">
             <div>
               <span className="text-[10px] text-slate-400 uppercase block">Current Session P/L</span>
               <span
-                className={`text-base font-black ${currentNetProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
+                className={`text-base font-black ${
+                  currentNetProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                }`}
               >
                 {currentNetProfit >= 0 ? '+' : ''}${currentNetProfit.toFixed(2)} USD
               </span>
@@ -161,46 +166,8 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
                 }`}
               >
                 <span
-                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                    (config.profitShieldActive ?? true) ? 'translate-x-5' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-            </div>
-            <p className="text-[11px] text-slate-400">
-              Guarantees won profits are saved! When you gain profits, this shield trails peak gains. If the market retraces, trading halts immediately to secure 100% of accumulated profit.
-            </p>
-            {(config.profitShieldActive ?? true) && (
-              <div className="flex items-center gap-2 pt-1 font-mono text-xs">
-                <span className="text-slate-400 text-[11px]">Protected Profit Portion:</span>
-                <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30">
-                  100% Locked &amp; Saved
-                </span>
-              </div>
-            )}
-          </div>
-
-          <div className="p-3.5 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Lock className="w-4 h-4 text-emerald-400" />
-                <span className="font-bold text-white text-sm">Profit Lock Auto-Halt</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => onToggleProfitLock(!profitLockEnabled)}
-                className={`relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out ${
-                  profitLockEnabled ? 'bg-emerald-500' : 'bg-slate-700'
-                }`}
-              >
-                <span
-                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                    profitLockEnabled ? 'translate-x-5' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-            </div>
-            <p className="text-[11px] text-slate-400">
+                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0˜[œÚ][Ûˆ\˜][Û‹LŒX\ÙKZ[‹[Ý]	Âˆ
+ÛÛ™šYËœ›Ùš]ÚY[XÝ]™HÏÈYJHÈ	Ý˜[œÛ]K^MIÈˆ	Ý˜[œÛ]K^L	ÂˆXBˆÏ‚ˆØ]Û‚ˆÙ]‚ˆ6Æ74æÖSÒ'FW‡BÕ³…ÒFW‡B×6ÆFRÓC#à¢wV&çFVW2vöâ&öf—G2&R6fVBv†Vâ–÷Rv–â&öf—G2ÂF†—26†–VÆBG&–Ç2V²v–ç2â–bF†RÖ&¶WB&WG&6W2ÂG&F–ær†ÇG2–ÖÖVF–FVÇ’Fò6V7W&RRöb67V×VÆFVB&öf—Bà¢Â÷à¢²†6öæf–rç&öf—E6†–VÆD7F—fRóòG'VR’bb€¢ÆF—b6Æ74æÖSÒ&fÆW‚—FV×2Ö6VçFW"vÓ"BÓföçBÖÖöæòFW‡B×‡2#à¢Ç7â6Æ74æÖSÒ'FW‡B×6ÆFRÓCFW‡BÕ³…Ò#å&÷FV7FVB&öf—B÷'F–öã£Â÷7ãà¢Ç7â6Æ74æÖSÒ'‚Ó"’ÓãR&÷VæFVB&rÖVÖW&ÆBÓSó#FW‡BÖVÖW&ÆBÓ3föçBÖ&öÆB&÷&FW"&÷&FW"ÖVÖW&ÆBÓSó3#à¢RÆö6¶VBf×²6fV@¢Â÷7ãà¢ÂöF—cà¢—Ð¢ÂöF—cà ¢ÆF—b6Æ74æÖSÒ'Ó2ãR&÷VæFVB×†Â&r×6ÆFRÓ“Só“&÷&FW"&÷&FW"×6ÆFRÓƒ76R×’Ó"#à¢ÆF—b6Æ74æÖSÒ&fÆW‚—FV×2Ö6VçFW"§W7F–g’Ö&WGvVVâ#à¢ÆF—b6Æ74æÖSÒ&fÆW‚—FV×2Ö6VçFW"vÓ"#à¢ÄÆö6²6Æ74æÖSÒ'rÓB‚ÓBFW‡BÖVÖW&ÆBÓC"óà¢Ç7â6Æ74æÖSÒ&föçBÖ&öÆBFW‡B×v†—FRFW‡B×6Ò#å&öf—BÆö6²WFòÔ†ÇCÂ÷7ãà¢ÂöF—cà¢Æ'WGFöà¢G—SÒ&'WGFöâ ¢öä6Æ–6³×²‚’ÓâöåFövvÆU&öf—DÆö6²‚&öf—DÆö6´Væ&ÆVB—Ð¢6Æ74æÖS×¶&VÆF—fR–æÆ–æRÖfÆW‚‚ÓRrÓ6‡&–æ²Ó7W'6÷"×ö–çFW"&÷VæFVBÖgVÆÂ&÷&FW"Ó"&÷&FW"×G&ç7&VçBG&ç6—F–öâÖ6öÆ÷'2GW&F–öâÓ#V6RÖ–âÖ÷WBG°¢&öf—DÆö6´Væ&ÆVBòv&rÖVÖW&ÆBÓSr¢v&r×6ÆFRÓsp¢ÖÐ¢à¢Ç7à¢6Æ74æÖS×¶ö–çFW"ÖWfVçG2ÖæöæR–æÆ–æRÖ&Æö6²‚ÓBrÓBG&ç6f÷&Ò&÷VæFVBÖgVÆÂ&r×v†—FR6†F÷r&–ærÓ ÑÉ…¹Í¥Ñ¥½¸‘ÕÉ…Ñ¥½¸´ÈÀÀ•…Í”µ¥¸µ½ÕÐ€‘ì(€€€€€€€€€€€€€€€€€€€ÁÉ½™¥Ñ1½­¹…‰±•€ü€ÑÉ…¹Í±…Ñ”µà´Ôœ€è€ÑÉ…¹Í±…Ñ”µà´Àœ(€€€€€€€€€€€€€€€€€õô(€€€€€€€€€€€€€€€€¼ø(€€€€€€€€€€€€€€ð½‰ÕÑÑ½¸ø(€€€€€€€€€€€€ð½‘¥Øø(€€€€€€€€€€€€ñÀ className="text-[11px] text-slate-400">
               Instantly stops the bot and pauses all trades once daily profit target is secured.
             </p>
             {profitLockEnabled && (
