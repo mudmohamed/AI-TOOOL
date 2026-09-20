@@ -44,7 +44,6 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
         id="auto-matches-safety-modal"
         className="w-full max-w-lg rounded-2xl bg-slate-900 border border-slate-700 shadow-2xl overflow-hidden space-y-4"
       >
-        {/* Modal Header with Warning Icon */}
         <div className="p-4 bg-slate-950 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-full bg-blue-600 text-yellow-300 flex items-center justify-center shadow-lg shadow-blue-900/50">
@@ -68,16 +67,12 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
           </button>
         </div>
 
-        {/* Modal Body */}
         <div className="p-5 space-y-4 text-xs font-sans">
-          {/* Current Session Stats */}
           <div className="grid grid-cols-2 gap-3 p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono">
             <div>
               <span className="text-[10px] text-slate-400 uppercase block">Current Session P/L</span>
               <span
-                className={`text-base font-black ${
-                  currentNetProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                }`}
+                className={`text-base font-black ${currentNetProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}
               >
                 {currentNetProfit >= 0 ? '+' : ''}${currentNetProfit.toFixed(2)} USD
               </span>
@@ -90,65 +85,6 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
             </div>
           </div>
 
-          {/* Setting 0A: Win Protection Strategy Mode */}
-          <div className="p-3.5 rounded-xl bg-slate-950/90 border border-emerald-500/40 space-y-2.5">
-            <div className="flex items-center gap-2">
-              <Zap className="w-4 h-4 text-emerald-400" />
-              <span className="font-bold text-white text-sm">Winning Strategy Mode</span>
-            </div>
-            <p className="text-[11px] text-slate-400">
-              Select the execution contract. 100% Win Shield trades DIFFERS against the coldest dormant digit for maximum win consistency.
-            </p>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 font-mono text-xs">
-              <button
-                type="button"
-                onClick={() =>
-                  onConfigChange({
-                    ...config,
-                    contractMode: 'DIFFERS',
-                  })
-                }
-                className={`p-2.5 rounded-xl border text-left flex flex-col gap-1 transition cursor-pointer ${
-                  config.contractMode !== 'MATCHES'
-                    ? 'bg-emerald-950/50 border-emerald-500 text-white ring-1 ring-emerald-400'
-                    : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
-                }`}
-              >
-                <div className="flex items-center gap-1.5 font-bold text-emerald-300">
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>100% Win Shield (DIFFERS)</span>
-                </div>
-                <div className="text-[10px] text-slate-400 font-normal">
-                  Highest win rate. Bets that the next tick will differ from the coldest stagnant digit.
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  onConfigChange({
-                    ...config,
-                    contractMode: 'MATCHES',
-                  })
-                }
-                className={`p-2.5 rounded-xl border text-left flex flex-col gap-1 transition cursor-pointer ${
-                  config.contractMode === 'MATCHES'
-                    ? 'bg-amber-950/50 border-amber-500 text-white ring-1 ring-amber-400'
-                    : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:text-white'
-                }`}
-              >
-                <div className="flex items-center gap-1.5 font-bold text-amber-300">
-                  <Target className="w-3.5 h-3.5" />
-                  <span>High Payout (MATCHES 10X)</span>
-                </div>
-                <div className="text-[10px] text-slate-400 font-normal">
-                  High-risk / 10x payout. Trades for an exact digit match using Markov transition prediction.
-                </div>
-              </button>
-            </div>
-          </div>
-
-          {/* Setting 0: Stop Condition Mode (Continuous vs Drawdown Circuit Breaker) */}
           <div className="p-3.5 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2.5">
             <div className="flex items-center gap-2">
               <Zap className="w-4 h-4 text-emerald-400" />
@@ -174,10 +110,10 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
               >
                 <div className="flex items-center gap-1.5 font-bold text-emerald-300">
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>24/7 Non-Stop (Stop ONLY by Me or TP)</span>
+                  <span>Only Me or Target 100%</span>
                 </div>
                 <div className="text-[10px] text-slate-400 font-normal">
-                  Continuous trading. Never halts on loss or noise. Runs until you click STOP or hit TP $10,000.
+                  Continuous mode. Never halts on loss. Stops ONLY when you click STOP or hit 100% Target.
                 </div>
               </button>
 
@@ -206,65 +142,6 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
             </div>
           </div>
 
-          {/* Setting 0B: Take Profit (TP) Target */}
-          <div className="p-3.5 rounded-xl bg-slate-950/90 border border-cyan-500/40 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Target className="w-4 h-4 text-cyan-400" />
-                <span className="font-bold text-white text-sm">Take Profit (TP) Goal Target</span>
-              </div>
-              <span className="text-[10px] text-cyan-300 font-mono font-bold px-2 py-0.5 rounded bg-cyan-950/60 border border-cyan-500/30">
-                Default $10,000
-              </span>
-            </div>
-            <p className="text-[11px] text-slate-400">
-              The bot will continuously trade until this target profit is reached, or until you click STOP manually.
-            </p>
-            <div className="flex items-center gap-2 pt-1 font-mono">
-              <span className="text-slate-400 text-[11px]">TP Target:</span>
-              <div className="flex items-center gap-1">
-                <span className="text-slate-500">$</span>
-                <input
-                  type="number"
-                  step="100"
-                  min="10"
-                  max="50000"
-                  value={config.expectedProfit || 10000}
-                  onChange={(e) =>
-                    onConfigChange({
-                      ...config,
-                      expectedProfit: Math.max(1, Number(e.target.value) || 10000),
-                    })
-                  }
-                  className="w-28 py-1 px-2 rounded bg-slate-900 border border-slate-700 text-cyan-300 font-bold text-xs"
-                />
-                <span className="text-slate-500">USD</span>
-              </div>
-              <div className="flex items-center gap-1 ml-auto">
-                {[1000, 5000, 10000, 20000].map((tp) => (
-                  <button
-                    key={tp}
-                    type="button"
-                    onClick={() =>
-                      onConfigChange({
-                        ...config,
-                        expectedProfit: tp,
-                      })
-                    }
-                    className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold transition cursor-pointer ${
-                      (config.expectedProfit || 10000) === tp
-                        ? 'bg-cyan-500 text-slate-950'
-                        : 'bg-slate-800 text-slate-300 hover:text-white'
-                    }`}
-                  >
-                    ${tp >= 1000 ? `${tp / 1000}k` : tp}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Setting 1: 100% Won Profit Protection Vault */}
           <div className="p-3.5 rounded-xl bg-slate-950/90 border border-emerald-500/40 space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -303,7 +180,6 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
             )}
           </div>
 
-          {/* Setting 2: Profit Lock */}
           <div className="p-3.5 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -334,9 +210,9 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
                   <span className="text-slate-500">$</span>
                   <input
                     type="number"
-                    step="100"
+                    step="5"
                     min="5"
-                    max="50000"
+                    max="1000"
                     value={profitLockTarget}
                     onChange={(e) => onProfitLockTargetChange(Number(e.target.value))}
                     className="w-24 py-1 px-2 rounded bg-slate-900 border border-slate-700 text-white font-bold text-xs"
@@ -347,7 +223,6 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
             )}
           </div>
 
-          {/* Setting 2: Session Stop Loss */}
           <div className="p-3.5 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -364,9 +239,9 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
                 <span className="text-slate-500">$</span>
                 <input
                   type="number"
-                  step="100"
+                  step="5"
                   min="5"
-                  max="50000"
+                  max="1000"
                   value={stopLoss}
                   onChange={(e) => onStopLossChange(Number(e.target.value))}
                   className="w-24 py-1 px-2 rounded bg-slate-900 border border-slate-700 text-white font-bold text-xs"
@@ -376,7 +251,6 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
             </div>
           </div>
 
-          {/* Setting 3: Auto-Matches Stake */}
           <div className="p-3.5 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
             <div className="flex items-center justify-between">
               <span className="font-bold text-white text-sm">Default Matches Stake</span>
@@ -403,7 +277,6 @@ export const AutoMatchesSafetyModal: React.FC<AutoMatchesSafetyModalProps> = ({
           </div>
         </div>
 
-        {/* Modal Footer */}
         <div className="p-4 bg-slate-950 border-t border-slate-800 flex justify-end">
           <button
             type="button"
