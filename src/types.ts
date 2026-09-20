@@ -29,7 +29,7 @@ export interface MarketAnalysis {
   symbol: string;
   displayName: string;
   currentPrice: number;
-  pip: number;
+  pip?: number;
   lastDigit: number;
   priceChange: number;
   priceChangePct: number;
