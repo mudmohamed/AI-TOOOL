@@ -1,0 +1,36 @@
+name: Restore Master DeepScan
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.master/DeepScanAutoMatches.tsx.gz'
+      - '.github/workflows/restore-master-deepscan.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore exact ZIP master file
+        run: |
+          gzip -dc .master/DeepScanAutoMatches.tsx.gz > src/components/DeepScanAutoMatches.tsx
+          ACTUAL="$(git hash-object src/components/DeepScanAutoMatches.tsx)"
+          EXPECTED="722f651e2ff920358b85b403360f2eedbefc3ddf"
+          echo "DeepScan blob: $ACTUAL"
+          test "$ACTUAL" = "$EXPECTED"
+      - name: Commit exact master file
+        run: |
+          git config user.name "mudmohamed"
+          git config user.email "hoolamohamed685@gmail.com"
+          git add src/components/DeepScanAutoMatches.tsx
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "restore: exact ZIP master DeepScanAutoMatches"
+          git push origin main
