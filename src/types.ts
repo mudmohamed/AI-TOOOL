@@ -3,7 +3,7 @@ export interface ActiveSymbol {
   display_name: string;
   market: string;
   submarket: string;
-  pip: number;
+  pip?: number;
 }
 
 export interface TickData {
