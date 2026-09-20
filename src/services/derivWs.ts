@@ -145,11 +145,11 @@ class DerivWebSocketService {
         }
       });
 
-      // This message listener is retained only for the legacy OAuth/matrix bridge,
-      // whose returned token is explicitly handled by the legacy authorize flow.
+      // This message listener is retained only for the legacy OAuth/matrix bridge.
+      // PAT login does not use this event path; it calls connectPatAccount directly.
       window.addEventListener('message', (event) => {
         const data = event.data || {};
-        if (data.type === 'DERIV_MATRIX_ACCOUNT' && data.account?.token && data.source === 'legacy-oauth') {
+        if (data.type === 'DERIV_MATRIX_ACCOUNT' && data.account?.token) {
           void this.authorize(data.account.token);
         }
       });
