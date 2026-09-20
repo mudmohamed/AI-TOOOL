@@ -633,6 +633,23 @@ export default function App() {
         return;
       }
 
+      if (data.msg_type === 'account_connection_status') {
+        if (data.connected) {
+          autoDispatchLockRef.current = false;
+          const symbol = currentSymbolRef.current;
+          const livePrice = derivService.getCurrentPrice(symbol);
+          const liveDigit =
+            livePrice !== undefined
+              ? derivService.extractLastDigit(livePrice, symbol)
+              : lastDigitRef.current;
+
+          if (autoMatchesActiveRef.current) {
+            dispatchNextAutoTradeRef.current?.(livePrice, liveDigit);
+          }
+        }
+        return;
+      }
+
       if (data.msg_type === 'history' && data.history) {
         const symbol = data.echo_req?.ticks_history || currentSymbolRef.current;
         const rawPrices = (data.history.prices || []).map(Number).filter(Number.isFinite);
@@ -695,9 +712,14 @@ export default function App() {
         }
         if (!derivService.isVirtualPracticeMode() && !derivService.isTradingReady()) {
           autoDispatchLockRef.current = false;
+          const mode: AccountMode = account.isVirtual ? 'DEMO' : 'REAL';
+          void derivService.connectTradingAccount(mode);
           return;
         }
-        if (!derivService.getConnectionState().connected) return;
+        if (!derivService.getConnectionState().connected) {
+          derivService.connect();
+          return;
+        }
 
         // Master pending/dispatch locks are enforced inside dispatchNextAutoTrade.
         if (autoMatchesActiveRef.current && symbol === currentSymbolRef.current) {
@@ -928,13 +950,8 @@ export default function App() {
   };
 
   const requireAuthorizedBot = (bot: ActiveBotType): boolean => {
-    if (!derivService.getConnectionState().connected) {
-      derivService.connect();
-      showNotice('Waiting for the live Deriv market feed.');
-      return false;
-    }
-
     const account = accountInfoRef.current;
+
     if (!account.isAuthorized) {
       showNotice('Connect Deriv before starting automated trading.');
       setIsConnectModalOpen(true);
@@ -947,14 +964,21 @@ export default function App() {
       return false;
     }
 
-    if (!derivService.isTradingReady()) {
-      const mode: AccountMode = account.isVirtual ? 'DEMO' : 'REAL';
-      showNotice(`${mode} account is connected but the Deriv trading socket is still reconnecting.`);
-      void derivService.connectTradingAccount(mode);
-      return false;
+    // Arm the requested bot immediately. Do not lose the user's START command
+    // just because either Deriv socket is reconnecting for a moment.
+    setActiveBotSafe(bot);
+
+    if (!derivService.getConnectionState().connected) {
+      derivService.connect();
+      showNotice('Bot armed — reconnecting the live Deriv market feed.');
     }
 
-    setActiveBotSafe(bot);
+    if (!derivService.isTradingReady()) {
+      const mode: AccountMode = account.isVirtual ? 'DEMO' : 'REAL';
+      showNotice(`${mode} bot armed — reconnecting the authenticated Deriv trading socket.`);
+      void derivService.connectTradingAccount(mode);
+    }
+
     return true;
   };
 
@@ -967,6 +991,7 @@ export default function App() {
     autoMatchesActiveRef.current = running;
     if (running) {
       autoDispatchLockRef.current = false;
+      showNotice('Auto-Matches armed. First trade will send on the live Deriv stream.');
       dispatchNextAutoTradeRef.current?.(currentPrice, lastDigit);
     } else {
       setActiveBotSafe('NONE');
