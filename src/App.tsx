@@ -832,20 +832,58 @@ export default function App() {
     });
   };
 
-  const handleToggleAccountMode = async (requested: AccountMode) => {
-    if (requested === 'REAL') {
-      const savedRealToken = typeof localStorage !== 'undefined' ? localStorage.getItem('deriv_token_real') : null;
-      if (savedRealToken) {
-        const ok = await derivService.authorize(savedRealToken);
-        if (ok) {
-          showNotice('Connected to Genuine Deriv Real Account.');
-          return;
-        }
-      }
+  const handleDirectDerivLogin = async () => {
+    if (accountInfoRef.current.isAuthorized && !accountInfoRef.current.isVirtual) {
       setIsConnectModalOpen(true);
-      showNotice('Please enter your Deriv API Token to connect your Real Account.');
       return;
     }
+
+    try {
+      const oauthClientId = localStorage.getItem('deriv_oauth_client_id') || '';
+      if (oauthClientId.trim()) {
+        await derivService.beginOAuthLogin(oauthClientId.trim());
+        return;
+      }
+    } catch {}
+
+    // Exact one-click legacy flow shown in the reference video:
+    // Connect Deriv -> Deriv authorization page -> callback to this app.
+    // If a modern OAuth2 client ID is later saved, beginOAuthLogin() above takes over.
+    window.location.assign(derivService.getOAuthUrl('1089'));
+  };
+
+  const handleToggleAccountMode = async (requested: AccountMode) => {
+    if (requested === 'REAL') {
+      if (accountInfoRef.current.isAuthorized && !accountInfoRef.current.isVirtual) {
+        return;
+      }
+
+      try {
+        const oauthToken = localStorage.getItem('deriv_oauth_access_token_real') || '';
+        const oauthExpiry = Number(localStorage.getItem('deriv_oauth_expires_at') || 0);
+        if (oauthToken && oauthExpiry > Date.now() + 15000) {
+          const ok = await derivService.connectOAuthAccount(oauthToken, 'REAL');
+          if (ok) {
+            showNotice('Connected to Genuine Deriv Real Account.');
+            return;
+          }
+        }
+
+        const savedRealToken = localStorage.getItem('deriv_token_real') || '';
+        const appId = derivService.getStoredAppId();
+        if (savedRealToken && appId && appId !== '1089') {
+          const ok = await derivService.connectPatAccount(savedRealToken, appId, 'REAL');
+          if (ok) {
+            showNotice('Connected to Genuine Deriv Real Account.');
+            return;
+          }
+        }
+      } catch {}
+
+      await handleDirectDerivLogin();
+      return;
+    }
+
     if (requested === 'DEMO') {
       derivService.startVirtualPracticeSession(10000);
       const acc = derivService.getAccountInfo();
@@ -920,7 +958,7 @@ export default function App() {
         totalTicksReceived={totalTicksReceived}
         watchlistCount={watchlist.length}
         onOpenWatchlist={() => setIsWatchlistOpen(true)}
-        onOpenConnectDeriv={() => setIsConnectModalOpen(true)}
+        onOpenConnectDeriv={handleDirectDerivLogin}
         onOpenCashierDeposit={() => setIsCashierOpen(true)}
         onOpenCashierWithdraw={() => setIsCashierOpen(true)}
         onOpenAuth={() => setIsAuthOpen(true)}
