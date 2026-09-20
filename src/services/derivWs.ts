@@ -1124,50 +1124,130 @@ class DerivWebSocketService {
       return false;
     }
 
-    try {
-      const response = await fetch('/api/deriv/pat-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          token: cleanToken,
-          app_id: cleanAppId,
-          mode: mode === 'DEMO' ? 'demo' : 'real',
-        }),
-      });
-      const payload = await response.json().catch(() => ({}));
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${cleanToken}`,
+      'Deriv-App-ID': cleanAppId,
+      Accept: 'application/json',
+    };
 
-      if (!response.ok) {
-        const message = String(payload?.error || 'Deriv account authentication failed.');
+    const accountIdOf = (account: any): string =>
+      String(account?.account_id || account?.loginid || account?.login_id || account?.id || '').trim();
+
+    const isDemoAccount = (account: any): boolean => {
+      const type = String(account?.account_type || account?.type || account?.accountType || '').toLowerCase();
+      const id = accountIdOf(account).toUpperCase();
+      return Boolean(account?.is_virtual) || type === 'demo' || type === 'virtual' || id.startsWith('VRTC');
+    };
+
+    const derivError = (payload: any, fallback: string): string => {
+      const first = Array.isArray(payload?.errors) ? payload.errors[0] : null;
+      return String(
+        first?.detail?.message ||
+        first?.message ||
+        payload?.error?.message ||
+        payload?.message ||
+        fallback,
+      );
+    };
+
+    try {
+      // Direct official Deriv REST flow. No Vercel/server proxy is involved:
+      // PAT + App ID -> Options accounts -> one-time authenticated WebSocket URL.
+      const accountsResponse = await fetch('https://api.derivws.com/trading/v1/options/accounts', {
+        method: 'GET',
+        headers,
+      });
+      const accountsPayload = await accountsResponse.json().catch(() => ({}));
+
+      if (!accountsResponse.ok) {
+        const message = derivError(accountsPayload, 'Deriv rejected the token or App ID.');
         this.notifyHandlers({ msg_type: 'auth_error', error: message });
         return false;
       }
 
-      const wsUrl = String(payload?.ws_url || '');
-      const account = payload?.account || {};
-      if (!wsUrl.startsWith('wss://') || !account?.account_id) {
-        this.notifyHandlers({ msg_type: 'auth_error', error: 'Deriv returned an incomplete authenticated session.' });
+      const raw =
+        (Array.isArray(accountsPayload?.data) && accountsPayload.data) ||
+        (Array.isArray(accountsPayload?.data?.accounts) && accountsPayload.data.accounts) ||
+        (Array.isArray(accountsPayload?.accounts) && accountsPayload.accounts) ||
+        [];
+
+      const accounts = raw.filter((account: any) => accountIdOf(account));
+      const realAccounts = accounts.filter((account: any) => !isDemoAccount(account));
+      const demoAccounts = accounts.filter((account: any) => isDemoAccount(account));
+      const selected = mode === 'REAL' ? realAccounts[0] : demoAccounts[0];
+
+      if (!selected) {
+        const message = mode === 'REAL'
+          ? 'No Deriv real Options account was found for this token.'
+          : 'No Deriv demo Options account was found for this token.';
+        this.notifyHandlers({ msg_type: 'auth_error', error: message });
         return false;
       }
+
+      const accountId = accountIdOf(selected);
+      const otpResponse = await fetch(
+        `https://api.derivws.com/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`,
+        { method: 'POST', headers },
+      );
+      const otpPayload = await otpResponse.json().catch(() => ({}));
+
+      if (!otpResponse.ok) {
+        const message = derivError(otpPayload, 'Deriv could not create the authenticated WebSocket session.');
+        this.notifyHandlers({ msg_type: 'auth_error', error: message });
+        return false;
+      }
+
+      const wsUrl = String(
+        otpPayload?.data?.url ||
+        otpPayload?.data?.ws_url ||
+        otpPayload?.url ||
+        otpPayload?.ws_url ||
+        '',
+      );
+
+      if (!wsUrl.startsWith('wss://api.derivws.com/')) {
+        this.notifyHandlers({
+          msg_type: 'auth_error',
+          error: 'Deriv returned an invalid authenticated WebSocket URL.',
+        });
+        return false;
+      }
+
+      const balanceValue =
+        typeof selected?.balance === 'object'
+          ? selected.balance?.balance ?? selected.balance?.amount
+          : selected?.balance;
+
+      const account = {
+        account_id: accountId,
+        account_type: isDemoAccount(selected) ? 'demo' : 'real',
+        currency: selected?.currency || 'USD',
+        balance: Number(balanceValue || 0),
+      };
 
       this.setStoredAppId(cleanAppId);
       try {
         localStorage.setItem('deriv_token', cleanToken);
+        localStorage.setItem(`deriv_token_${accountId}`, cleanToken);
         if (mode === 'DEMO') localStorage.setItem('deriv_token_demo', cleanToken);
         else localStorage.setItem('deriv_token_real', cleanToken);
       } catch {}
 
       const ok = await this.applyBridgeAccount(
         { ...account, token: cleanToken },
-        payload?.available || {},
+        { demo: demoAccounts.length > 0, real: realAccounts.length > 0 },
         wsUrl,
       );
 
-      if (ok) {
-        this.notifyHandlers({ msg_type: 'auth_success', account: this.accountInfo });
-      }
+      if (ok) this.notifyHandlers({ msg_type: 'auth_success', account: this.accountInfo });
       return ok;
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unable to connect to Deriv.';
+      const message =
+        error instanceof TypeError
+          ? 'Browser could not reach the Deriv REST API. Check the network connection and try again.'
+          : error instanceof Error
+            ? error.message
+            : 'Unable to connect to Deriv.';
       this.notifyHandlers({ msg_type: 'auth_error', error: message });
       return false;
     }
