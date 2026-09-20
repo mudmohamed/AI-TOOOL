@@ -41,6 +41,7 @@ class DerivWebSocketService {
   private getPublicEndpoints(): string[] {
     const appId = this.getStoredAppId() || '1089';
     return [
+      'wss://api.derivws.com/trading/v1/options/ws/public',
       `wss://ws.derivws.com/websockets/v3?app_id=${appId}`,
       `wss://ws.binaryws.com/websockets/v3?app_id=${appId}`,
     ];
@@ -60,6 +61,7 @@ class DerivWebSocketService {
 
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  private accountReconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private messageHandlers = new Set<MessageHandler>();
   private isConnected = false;
   private latency = 0;
@@ -765,6 +767,7 @@ class DerivWebSocketService {
     if (available?.demo !== false) accountsList.push({ loginid: 'DEMO', currency, is_virtual: true });
     if (available?.real) accountsList.push({ loginid: 'REAL', currency, is_virtual: false });
 
+    this.isPracticeSession = isVirtual;
     this.accountInfo = {
       isAuthorized: true,
       appId: 'oauth2',
@@ -777,6 +780,60 @@ class DerivWebSocketService {
     this.resetAllMatchesRecovery();
     this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
     return this.openAccountSocket(wsUrl);
+  }
+
+  private scheduleRealAccountReconnect(): void {
+    if (typeof window === 'undefined') return;
+    if (this.intentionalAccountClose || this.accountInfo.isVirtual) return;
+    if (this.accountReconnectTimeout) return;
+
+    this.accountReconnectTimeout = setTimeout(() => {
+      this.accountReconnectTimeout = null;
+      try {
+        const accessToken = localStorage.getItem('deriv_oauth_access_token_real') || '';
+        const oauthExpiry = Number(localStorage.getItem('deriv_oauth_expires_at') || 0);
+        if (!accessToken || oauthExpiry <= Date.now() + 15000) {
+          this.notifyHandlers({
+            msg_type: 'auth_error',
+            error: 'Deriv REAL session expired. Press Connect Deriv again.',
+          });
+          this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
+          this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+          return;
+        }
+        void this.connectOAuthAccount(accessToken, 'REAL');
+      } catch {
+        this.notifyHandlers({
+          msg_type: 'auth_error',
+          error: 'Could not restore the Deriv REAL trading connection.',
+        });
+      }
+    }, 1200);
+  }
+
+  public isRealTradingReady(): boolean {
+    return Boolean(
+      this.accountInfo.isAuthorized &&
+      !this.accountInfo.isVirtual &&
+      !this.isPracticeSession &&
+      this.accountWs?.readyState === WebSocket.OPEN
+    );
+  }
+
+  public getTradingConnectionState(): {
+    publicConnected: boolean;
+    accountConnected: boolean;
+    realReady: boolean;
+    isVirtual: boolean;
+    loginId?: string;
+  } {
+    return {
+      publicConnected: this.isConnected,
+      accountConnected: this.accountWs?.readyState === WebSocket.OPEN,
+      realReady: this.isRealTradingReady(),
+      isVirtual: Boolean(this.accountInfo.isVirtual),
+      loginId: this.accountInfo.loginId,
+    };
   }
 
   private openAccountSocket(url: string): Promise<boolean> {
@@ -806,6 +863,11 @@ class DerivWebSocketService {
 
       ws.onopen = () => {
         if (this.accountWs !== ws) return;
+        if (this.accountReconnectTimeout) {
+          clearTimeout(this.accountReconnectTimeout);
+          this.accountReconnectTimeout = null;
+        }
+        this.isPracticeSession = Boolean(this.accountInfo.isVirtual);
         this.sendAccount({ balance: 1, subscribe: 1, req_id: this.nextPrivateReqId() });
         this.notifyHandlers({ msg_type: 'account_connection_status', connected: true });
         this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
@@ -838,9 +900,8 @@ class DerivWebSocketService {
         this.proposalMeta.clear();
         this.openContracts.clear();
         this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
-        if (!this.intentionalAccountClose) {
-          this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
-          this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+        if (!this.intentionalAccountClose && !this.accountInfo.isVirtual) {
+          this.scheduleRealAccountReconnect();
         }
         finish(false);
       };
@@ -1170,6 +1231,10 @@ class DerivWebSocketService {
 
   public logout(): void {
     this.isPracticeSession = false;
+    if (this.accountReconnectTimeout) {
+      clearTimeout(this.accountReconnectTimeout);
+      this.accountReconnectTimeout = null;
+    }
     this.virtualOpenContracts.clear();
     this.intentionalAccountClose = true;
     if (this.accountWs) {
@@ -1549,17 +1614,18 @@ class DerivWebSocketService {
   }
 
   public placeContract(params: PlaceContractParams): boolean {
-    if (this.isPracticeSession) {
+    if (this.isPracticeSession || this.accountInfo.isVirtual) {
       return this.placeVirtualPracticeContract(params);
     }
 
     if (!this.accountInfo.isAuthorized) {
-      this.startVirtualPracticeSession();
-      return this.placeVirtualPracticeContract(params);
-    }
-
-    if (this.accountInfo.isVirtual && (!this.accountWs || this.accountWs.readyState !== WebSocket.OPEN)) {
-      return this.placeVirtualPracticeContract(params);
+      this.notifyHandlers({
+        msg_type: 'trade_error',
+        clientTradeId: params.clientTradeId,
+        stage: 'preflight',
+        error: 'REAL account is not connected. Press Connect Deriv first.',
+      });
+      return false;
     }
 
     if (!this.accountWs || this.accountWs.readyState !== WebSocket.OPEN) {
@@ -1567,9 +1633,10 @@ class DerivWebSocketService {
         msg_type: 'trade_error',
         clientTradeId: params.clientTradeId,
         stage: 'preflight',
-        error: 'Deriv live account WebSocket is reconnecting. Practice session activated for instant execution.',
+        error: 'REAL trading connection is reconnecting. No practice order was placed.',
       });
-      return this.placeVirtualPracticeContract(params);
+      this.scheduleRealAccountReconnect();
+      return false;
     }
 
     let amount = Number(params.amount);
@@ -1649,7 +1716,16 @@ class DerivWebSocketService {
     if (barrier !== undefined && barrier !== '') proposalRequest.barrier = barrier;
 
     const sent = this.sendAccount(proposalRequest);
-    if (!sent) this.proposalRequests.delete(reqId);
+    if (!sent) {
+      this.proposalRequests.delete(reqId);
+      this.notifyHandlers({
+        msg_type: 'trade_error',
+        clientTradeId: params.clientTradeId,
+        stage: 'proposal',
+        error: 'REAL proposal could not be sent because the Deriv trading socket is not open.',
+      });
+      this.scheduleRealAccountReconnect();
+    }
     return sent;
   }
 
