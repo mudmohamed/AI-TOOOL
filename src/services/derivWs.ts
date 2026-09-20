@@ -133,33 +133,38 @@ class DerivWebSocketService {
     if (typeof window !== 'undefined') {
       this.checkUrlForOAuthTokens();
 
-      // Listen for OAuth authorization updates across windows or tabs
+      // Keep PAT sessions on Deriv's current REST account -> OTP -> authenticated
+      // WebSocket flow. Never feed a stored PAT into the legacy WebSocket authorize call.
       window.addEventListener('storage', (event) => {
-        if (event.key === 'deriv_token' || event.key === 'deriv_token_demo' || event.key === 'deriv_token_real') {
+        if (event.key === 'deriv_token_real') {
           const tok = event.newValue;
-          if (tok && (!this.accountInfo.isAuthorized || this.isPracticeSession)) {
-            void this.authorize(tok);
+          const appId = this.getStoredAppId();
+          if (tok && appId && appId !== '1089' && (!this.accountInfo.isAuthorized || this.isPracticeSession)) {
+            void this.connectPatAccount(tok, appId, 'REAL');
           }
         }
       });
 
+      // This message listener is retained only for the legacy OAuth/matrix bridge,
+      // whose returned token is explicitly handled by the legacy authorize flow.
       window.addEventListener('message', (event) => {
         const data = event.data || {};
-        if (data.type === 'DERIV_MATRIX_ACCOUNT' && data.account?.token) {
+        if (data.type === 'DERIV_MATRIX_ACCOUNT' && data.account?.token && data.source === 'legacy-oauth') {
           void this.authorize(data.account.token);
         }
       });
 
       try {
-        const savedToken = localStorage.getItem('deriv_token_real') || localStorage.getItem('deriv_token');
-        if (savedToken) {
+        const savedToken = localStorage.getItem('deriv_token_real');
+        const appId = this.getStoredAppId();
+        if (savedToken && appId && appId !== '1089') {
           setTimeout(() => {
-            if (!this.accountInfo.isAuthorized) {
-              void this.authorize(savedToken);
+            if (!this.accountInfo.isAuthorized || this.isPracticeSession) {
+              void this.connectPatAccount(savedToken, appId, 'REAL');
             }
           }, 600);
         } else {
-          // Immediately start genuine Deriv Demo practice session so app is alive on load
+          // Keep the app usable without silently attempting obsolete PAT authorization.
           this.startVirtualPracticeSession();
         }
       } catch {
@@ -1084,21 +1089,22 @@ class DerivWebSocketService {
       return;
     }
 
-    // Target is REAL account
+    // Target is REAL account. PAT authentication must use the current
+    // REST account lookup -> OTP -> authenticated WebSocket flow.
     try {
       const savedToken =
-        localStorage.getItem(`deriv_token_${loginId}`) ||
         localStorage.getItem('deriv_token_real') ||
-        localStorage.getItem('deriv_token');
-      if (savedToken) {
-        void this.authorize(savedToken);
+        localStorage.getItem(`deriv_token_${loginId}`);
+      const appId = this.getStoredAppId();
+      if (savedToken && appId && appId !== '1089') {
+        void this.connectPatAccount(savedToken, appId, 'REAL');
         return;
       }
     } catch {}
 
     this.notifyHandlers({
       msg_type: 'auth_error',
-      error: 'Please select DEMO or REAL in the Trading Account modal.',
+      error: 'Open Trading Account > Real Account and enter your PAT App ID and Deriv Personal Access Token.',
     });
   }
 
