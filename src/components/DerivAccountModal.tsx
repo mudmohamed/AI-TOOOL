@@ -325,8 +325,12 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
                   setIsSubmitting(true);
                   try {
                     const savedClientId = derivService.getStoredOAuthClientId();
-                    if (savedClientId) await derivService.beginOAuthLogin(savedClientId);
-                    else window.location.assign(derivService.getOAuthUrl('1089'));
+                    if (!savedClientId) {
+                      setAuthError('Deriv OAuth login is not configured for this deployment yet.');
+                      setIsSubmitting(false);
+                      return;
+                    }
+                    await derivService.beginOAuthLogin(savedClientId);
                   } catch (err: any) {
                     setAuthError(err?.message || 'Could not open Deriv login.');
                     setIsSubmitting(false);
