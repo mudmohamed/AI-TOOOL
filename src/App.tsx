@@ -854,9 +854,7 @@ export default function App() {
 
   const handleToggleAccountMode = async (requested: AccountMode) => {
     if (requested === 'REAL') {
-      if (accountInfoRef.current.isAuthorized && !accountInfoRef.current.isVirtual) {
-        return;
-      }
+      if (accountInfoRef.current.isAuthorized && !accountInfoRef.current.isVirtual) return;
 
       try {
         const oauthToken = localStorage.getItem('deriv_oauth_access_token_real') || '';
@@ -868,18 +866,9 @@ export default function App() {
             return;
           }
         }
-
-        const savedRealToken = localStorage.getItem('deriv_token_real') || '';
-        const appId = derivService.getStoredAppId();
-        if (savedRealToken && appId && appId !== '1089') {
-          const ok = await derivService.connectPatAccount(savedRealToken, appId, 'REAL');
-          if (ok) {
-            showNotice('Connected to Genuine Deriv Real Account.');
-            return;
-          }
-        }
       } catch {}
 
+      // No PAT/API-token path here. REAL always uses Deriv authorization.
       await handleDirectDerivLogin();
       return;
     }
