@@ -58,25 +58,6 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleOAuthLogin = async () => {
-    setAuthError(null);
-    setSuccessMsg(null);
-    const cleanClientId = oauthClientId.trim();
-    if (!cleanClientId) {
-      setAuthError('Enter the OAuth App ID from your Deriv developer application once, then press LOGIN WITH DERIV.');
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      await derivService.beginOAuthLogin(cleanClientId);
-    } catch (err: any) {
-      setAuthError(err?.message || 'Could not open Deriv login.');
-      setIsSubmitting(false);
-    }
-  };
-
-
   const handleSwitchToDemo = () => {
     setAuthError(null);
     setSuccessMsg(null);
@@ -211,7 +192,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
                   : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
               }`}
             >
-              <Key className="w-3.5 h-3.5" />
+              <ShieldCheck className="w-3.5 h-3.5" />
               <span>Real Account</span>
             </button>
             <button
