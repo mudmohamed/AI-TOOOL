@@ -48,7 +48,8 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
   const [activeTab, setActiveTab] = useState<'REAL_TOKEN' | 'DEMO' | 'ADVANCED'>('REAL_TOKEN');
   const [tokenInput, setTokenInput] = useState('');
   const [showToken, setShowToken] = useState(false);
-  const [customAppId, setCustomAppId] = useState('');
+  const [oauthClientId, setOauthClientId] = useState('');
+  const [patAppId, setPatAppId] = useState('');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
@@ -62,15 +63,34 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
         if (savedRealToken && !savedRealToken.startsWith('demo')) {
           setTokenInput(savedRealToken);
         }
-        const savedAppId = localStorage.getItem('deriv_app_id') || '';
-        if (savedAppId) {
-          setCustomAppId(savedAppId);
-        }
+        const savedOAuthClientId = localStorage.getItem('deriv_oauth_client_id') || '';
+        if (savedOAuthClientId) setOauthClientId(savedOAuthClientId);
+
+        const savedPatAppId = localStorage.getItem('deriv_app_id') || '';
+        if (savedPatAppId && savedPatAppId !== '1089') setPatAppId(savedPatAppId);
       } catch {}
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
+
+  const handleOAuthLogin = async () => {
+    setAuthError(null);
+    setSuccessMsg(null);
+    const cleanClientId = oauthClientId.trim();
+    if (!cleanClientId) {
+      setAuthError('Enter the OAuth App ID from your Deriv developer application once, then press LOGIN WITH DERIV.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await derivService.beginOAuthLogin(cleanClientId);
+    } catch (err: any) {
+      setAuthError(err?.message || 'Could not open Deriv login.');
+      setIsSubmitting(false);
+    }
+  };
 
   const handleConnectToken = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -78,7 +98,7 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
     setSuccessMsg(null);
 
     const cleanToken = tokenInput.trim();
-    const cleanAppId = customAppId.trim();
+    const cleanAppId = patAppId.trim();
     if (!cleanToken) {
       setAuthError('Please paste your Deriv Personal Access Token.');
       return;
@@ -124,6 +144,8 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
     try {
       localStorage.removeItem('deriv_token_real');
       localStorage.removeItem('deriv_token');
+      localStorage.removeItem('deriv_oauth_access_token_real');
+      localStorage.removeItem('deriv_oauth_expires_at');
     } catch {}
     setSuccessMsg('Real account disconnected. Now in Demo Practice mode.');
     setTimeout(() => {
@@ -269,124 +291,80 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
             </button>
           </div>
 
-          {/* TAB 1: Real Account API Token Input */}
+          {/* TAB 1: Direct Deriv OAuth2 Login */}
           {activeTab === 'REAL_TOKEN' && (
             <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-3">
-                <label className="text-xs font-mono font-bold text-slate-200 flex items-center gap-1.5">
-                  <Settings className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>DERIV PAT APP ID (REQUIRED)</span>
-                </label>
-                <input
-                  id="deriv-pat-app-id-input"
-                  type="text"
-                  inputMode="numeric"
-                  value={customAppId}
-                  onChange={(e) => setCustomAppId(e.target.value)}
-                  placeholder="Paste the App ID from your PAT application"
-                  className="w-full px-3.5 py-3 rounded-xl bg-slate-950 border border-slate-700/80 focus:border-cyan-500 focus:outline-none text-xs text-white font-mono placeholder:text-slate-500 transition shadow-inner"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Use the App ID from a <strong className="text-cyan-300">PAT application</strong> registered in the Deriv developer dashboard. Legacy App ID 1089 is not used for this login.
+              <div className="p-4 rounded-2xl bg-emerald-950/20 border border-emerald-500/30 space-y-2">
+                <div className="flex items-center gap-2 text-sm font-mono font-black text-emerald-300">
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>DIRECT DERIV LOGIN — NO API TOKEN TO PASTE</span>
+                </div>
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Press <strong className="text-white">LOGIN WITH DERIV</strong>. SKIPPER sends you to Deriv's official sign-in and consent page, then returns here and connects the REAL Options account automatically.
                 </p>
               </div>
 
               <div className="p-4 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-3">
                   <label className="text-xs font-mono font-bold text-slate-200 flex items-center gap-1.5">
-                    <Key className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>DERIV API TOKEN</span>
+                    <Settings className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>OAUTH APP ID</span>
                   </label>
                   <a
-                    href="https://app.deriv.com/account/api-token"
+                    href="https://developers.deriv.com"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[11px] font-mono font-bold text-emerald-400 hover:text-emerald-300 hover:underline flex items-center gap-1"
+                    className="text-[11px] font-mono font-bold text-cyan-400 hover:text-cyan-300 hover:underline flex items-center gap-1"
                   >
-                    <span>Get API Token on Deriv</span>
+                    <span>Deriv Developer Dashboard</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
                 </div>
 
-                {/* Token Input with Show/Hide Toggle */}
-                <form onSubmit={handleConnectToken} className="space-y-3">
-                  <div className="relative">
-                    <input
-                      id="deriv-api-token-input"
-                      type={showToken ? 'text' : 'password'}
-                      value={tokenInput}
-                      onChange={(e) => setTokenInput(e.target.value)}
-                      placeholder="Paste your Deriv API Token (e.g. wF39kQ...)"
-                      className="w-full px-3.5 py-3 pr-10 rounded-xl bg-slate-950 border border-slate-700/80 focus:border-emerald-500 focus:outline-none text-xs text-white font-mono placeholder:text-slate-500 transition shadow-inner"
-                      autoComplete="off"
-                      spellCheck={false}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowToken(!showToken)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer p-1"
-                      title={showToken ? 'Hide token' : 'Show token'}
-                    >
-                      {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
+                <input
+                  id="deriv-oauth-client-id-input"
+                  type="text"
+                  value={oauthClientId}
+                  onChange={(e) => setOauthClientId(e.target.value)}
+                  placeholder="Your Deriv OAuth2 App ID"
+                  className="w-full px-3.5 py-3 rounded-xl bg-slate-950 border border-slate-700/80 focus:border-cyan-500 focus:outline-none text-xs text-white font-mono placeholder:text-slate-500 transition shadow-inner"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+
+                <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-[11px] text-slate-400 leading-relaxed">
+                  Register this exact callback URL in that OAuth2 application:
+                  <div className="mt-1.5 px-2.5 py-2 rounded-lg bg-slate-900 border border-slate-700 text-cyan-300 font-mono break-all">
+                    {typeof window !== 'undefined' ? `${window.location.origin}/` : 'https://ai-toool-azure.vercel.app/'}
                   </div>
-
-                  <button
-                    id="connect-real-account-submit-btn"
-                    type="submit"
-                    disabled={isSubmitting || !tokenInput.trim() || !customAppId.trim() || customAppId.trim() === '1089'}
-                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-mono font-black text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <LoaderCircle className="w-4 h-4 animate-spin text-slate-950" />
-                        <span>AUTHORIZING WITH DERIV...</span>
-                      </>
-                    ) : (
-                      <>
-                        <ShieldCheck className="w-4 h-4 text-slate-950" />
-                        <span>CONNECT REAL ACCOUNT</span>
-                      </>
-                    )}
-                  </button>
-                </form>
-              </div>
-
-              {/* Step-by-Step Guide */}
-              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800/80 space-y-2.5 text-xs">
-                <div className="font-mono font-bold text-slate-300 flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px]">
-                    ?
-                  </span>
-                  <span>Current Deriv PAT login:</span>
+                  SKIPPER saves the App ID in this browser, so after setup the login is one button.
                 </div>
-                <ol className="space-y-2 text-slate-400 pl-2 leading-relaxed font-sans">
-                  <li className="flex items-start gap-2">
-                    <span className="text-emerald-400 font-mono font-bold">1.</span>
-                    <span>
-                      Sign in to <a href="https://developers.deriv.com" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline font-mono">developers.deriv.com</a>, register a <strong>PAT</strong> application, and paste its App ID above.
-                    </span>
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <span className="text-emerald-400 font-mono font-bold">2.</span>
-                    <span>
-                      Generate a Personal Access Token for that application with the <strong className="text-emerald-300 font-mono bg-emerald-500/10 px-1 py-0.5 rounded border border-emerald-500/20">trade</strong> permission.
-                    </span>
-                  </li>
-                  <li className="flex items-start gap-2">
-                    <span className="text-emerald-400 font-mono font-bold">3.</span>
-                    <span>Paste that PAT above and press <strong>CONNECT REAL ACCOUNT</strong>. SKIPPER requests a one-time authenticated Deriv WebSocket URL for your real Options account.</span>
-                  </li>
-                </ol>
+
+                <button
+                  id="login-with-deriv-btn"
+                  type="button"
+                  onClick={handleOAuthLogin}
+                  disabled={isSubmitting || !oauthClientId.trim()}
+                  className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-mono font-black text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <LoaderCircle className="w-4 h-4 animate-spin" />
+                      <span>OPENING DERIV...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldCheck className="w-4 h-4" />
+                      <span>LOGIN WITH DERIV</span>
+                    </>
+                  )}
+                </button>
               </div>
 
-              {/* Security Guarantee */}
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start gap-2 text-xs text-emerald-300 leading-relaxed">
-                <Lock className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <div className="p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-start gap-2 text-xs text-cyan-200 leading-relaxed">
+                <Lock className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
                 <span>
-                  Your token stays in your browser storage. During login it is sent over HTTPS to this site's serverless connection route only to request Deriv's short-lived authenticated WebSocket URL; the route does not persist the token.
+                  Your Deriv password is entered only on Deriv's own login page. SKIPPER receives an OAuth authorization result and uses Deriv's short-lived authenticated WebSocket session for the selected real account.
                 </span>
               </div>
             </div>
@@ -423,32 +401,60 @@ export const DerivAccountModal: React.FC<DerivAccountModalProps> = ({
             </div>
           )}
 
-          {/* TAB 3: Advanced App ID & Direct OAuth */}
+          {/* TAB 3: Advanced PAT fallback */}
           {activeTab === 'ADVANCED' && (
             <div className="p-4 sm:p-5 rounded-2xl bg-[#0e1628] border border-slate-800/90 space-y-4 text-xs">
               <div>
-                <h3 className="text-sm font-bold text-white font-mono">DERIV DEVELOPER APP ID</h3>
+                <h3 className="text-sm font-bold text-white font-mono">ADVANCED PAT FALLBACK</h3>
                 <p className="text-xs text-slate-400 leading-relaxed mt-1">
-                  Current Deriv PAT authentication requires the App ID from a PAT application registered in the Deriv developer dashboard. The old legacy App ID 1089 is not used for this authenticated real-account flow.
+                  Normal users should use <strong className="text-emerald-300">LOGIN WITH DERIV</strong>. This section is only a fallback for a Deriv PAT application.
                 </p>
               </div>
 
               <div className="space-y-2">
-                <label className="text-xs font-mono font-bold text-slate-300">CUSTOM APP ID (OPTIONAL):</label>
+                <label className="text-xs font-mono font-bold text-slate-300">PAT APP ID:</label>
                 <input
                   type="text"
-                  value={customAppId}
-                  onChange={(e) => setCustomAppId(e.target.value)}
-                  placeholder="Your PAT application App ID"
+                  value={patAppId}
+                  onChange={(e) => setPatAppId(e.target.value)}
+                  placeholder="PAT application App ID"
                   className="w-full px-3 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white font-mono text-xs focus:border-cyan-500 focus:outline-none"
+                  autoComplete="off"
+                  spellCheck={false}
                 />
               </div>
 
-              <div className="pt-2 border-t border-slate-800 space-y-2">
-                <div className="text-slate-400 leading-relaxed">
-                  <strong>Why OAuth redirect fails in web containers:</strong> Deriv's OAuth redirects back strictly to the URL registered in the developer portal for that specific App ID. Because preview URLs change dynamically, entering your <strong>API Token</strong> in the Real Account tab is the 100% reliable connection method.
+              <form onSubmit={handleConnectToken} className="space-y-3">
+                <div className="relative">
+                  <input
+                    id="deriv-api-token-input"
+                    type={showToken ? 'text' : 'password'}
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    placeholder="Deriv Personal Access Token"
+                    className="w-full px-3.5 py-3 pr-10 rounded-xl bg-slate-950 border border-slate-700/80 focus:border-emerald-500 focus:outline-none text-xs text-white font-mono placeholder:text-slate-500 transition shadow-inner"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowToken(!showToken)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer p-1"
+                    title={showToken ? 'Hide token' : 'Show token'}
+                  >
+                    {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
-              </div>
+
+                <button
+                  type="submit"
+                  disabled={isSubmitting || !tokenInput.trim() || !patAppId.trim() || patAppId.trim() === '1089'}
+                  className="w-full py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 font-mono font-black text-xs uppercase tracking-wider transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Key className="w-4 h-4" />
+                  <span>CONNECT WITH PAT</span>
+                </button>
+              </form>
             </div>
           )}
 
