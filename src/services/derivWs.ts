@@ -154,10 +154,13 @@ class DerivWebSocketService {
               localStorage.removeItem('deriv_oauth_access_token_real');
               localStorage.removeItem('deriv_oauth_expires_at');
             }
-            this.startVirtualPracticeSession();
+            this.isPracticeSession = false;
+            this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
+            localStorage.removeItem('deriv_virtual_practice');
           }
         } catch {
-          this.startVirtualPracticeSession();
+          this.isPracticeSession = false;
+          this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
         }
       }
     }
