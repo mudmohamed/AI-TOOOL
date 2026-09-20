@@ -1,0 +1,2 @@
+Trigger a clean Vercel production rebuild of the current main branch containing the Deriv PAT account lookup + OTP WebSocket login flow.
+No trading-strategy logic is changed by this file.
