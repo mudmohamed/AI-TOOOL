@@ -1473,10 +1473,6 @@ class DerivWebSocketService {
     return true;
   }
 
-  public getOAuthRedirectUrl(): string {
-    return this.getOAuthUrl();
-  }
-
   public connectPublicStream(): void {
     this.reconnect();
   }
