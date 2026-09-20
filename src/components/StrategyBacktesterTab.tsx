@@ -232,11 +232,15 @@ export const StrategyBacktesterTab: React.FC<StrategyBacktesterTabProps> = ({
               onChange={(e) => setSelectedSymbol(e.target.value)}
               className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs font-bold text-white focus:outline-none focus:border-purple-500"
             >
-              {POPULAR_DERIV_SYMBOLS.map((sym) => (
-                <option key={sym} value={sym}>
-                  {sym}
-                </option>
-              ))}
+              {POPULAR_DERIV_SYMBOLS.map((item) => {
+                const symbol = typeof item === 'string' ? item : item.symbol;
+                const label = typeof item === 'string' ? item : item.name;
+                return (
+                  <option key={symbol} value={symbol}>
+                    {label}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
