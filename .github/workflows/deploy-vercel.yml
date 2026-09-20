@@ -1,0 +1,56 @@
+name: Deploy SKIPPER to Vercel
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: skipper-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: team_HHOMaGRKFqWbg01VM1kNstYl
+      VERCEL_PROJECT_ID: prj_80wcuj4nHsTPzB9Fn86bTcZ0ZajN
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check Vercel deployment credential
+        id: auth
+        shell: bash
+        run: |
+          if [ -n "$VERCEL_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Vercel production credential is configured."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::VERCEL_TOKEN is not configured in GitHub Actions secrets. Build verification can still pass, but production deployment is skipped."
+          fi
+
+      - name: Install Vercel CLI
+        if: steps.auth.outputs.available == 'true'
+        run: npm install --global vercel@latest
+
+      - name: Pull production project settings
+        if: steps.auth.outputs.available == 'true'
+        run: vercel pull --yes --environment=production
+
+      - name: Build production output
+        if: steps.auth.outputs.available == 'true'
+        run: vercel build --prod
+
+      - name: Deploy production
+        if: steps.auth.outputs.available == 'true'
+        run: vercel deploy --prebuilt --prod --yes
