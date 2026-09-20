@@ -76,12 +76,12 @@ export const IndicatorsPanel: React.FC<IndicatorsPanelProps> = ({ analysis, pip 
         </div>
       </div>
 
-      {/* 2. Multi-MA Trend Alignment (SMA-10 & EMA) */}
+      {/* 2. Multi-EMA Trend Alignment */}
       <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-900/60 flex flex-col justify-between">
         <div className="flex items-center justify-between">
           <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-            <TrendingUp className="w-3.5 h-3.5 text-purple-400" />
-            Moving Averages (SMA 10 / EMAs)
+            <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
+            EMA Alignment (9 / 21 / 50)
           </span>
           <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
             trend.includes('BULLISH')
@@ -94,29 +94,25 @@ export const IndicatorsPanel: React.FC<IndicatorsPanelProps> = ({ analysis, pip 
           </span>
         </div>
 
-        <div className="grid grid-cols-4 gap-1.5 my-2 font-mono text-xs text-center">
-          <div className="p-1 rounded bg-slate-950 border border-purple-500/30">
-            <div className="text-[9px] text-purple-400 font-bold">SMA 10</div>
-            <div className="text-white font-bold text-[11px]">{analysis.sma10 !== undefined ? analysis.sma10.toFixed(pip) : '—'}</div>
+        <div className="grid grid-cols-3 gap-2 my-2 font-mono text-xs text-center">
+          <div className="p-1.5 rounded bg-slate-950 border border-slate-800">
+            <div className="text-[10px] text-cyan-400 font-bold">EMA 9</div>
+            <div className="text-white font-bold">{ema9.toFixed(pip)}</div>
           </div>
-          <div className="p-1 rounded bg-slate-950 border border-slate-800">
-            <div className="text-[9px] text-cyan-400 font-bold">EMA 9</div>
-            <div className="text-white font-bold text-[11px]">{ema9.toFixed(pip)}</div>
+          <div className="p-1.5 rounded bg-slate-950 border border-slate-800">
+            <div className="text-[10px] text-amber-400 font-bold">EMA 21</div>
+            <div className="text-white font-bold">{ema21.toFixed(pip)}</div>
           </div>
-          <div className="p-1 rounded bg-slate-950 border border-slate-800">
-            <div className="text-[9px] text-amber-400 font-bold">EMA 21</div>
-            <div className="text-white font-bold text-[11px]">{ema21.toFixed(pip)}</div>
-          </div>
-          <div className="p-1 rounded bg-slate-950 border border-slate-800">
-            <div className="text-[9px] text-slate-400 font-bold">EMA 50</div>
-            <div className="text-white font-bold text-[11px]">{ema50.toFixed(pip)}</div>
+          <div className="p-1.5 rounded bg-slate-950 border border-slate-800">
+            <div className="text-[10px] text-slate-400 font-bold">EMA 50</div>
+            <div className="text-white font-bold">{ema50.toFixed(pip)}</div>
           </div>
         </div>
 
         <div className="text-[10px] font-mono text-slate-400 flex items-center justify-between">
-          <span>SMA-10 Trend:</span>
-          <span className={analysis.sma10 && currentPrice >= analysis.sma10 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-            {analysis.sma10 ? (currentPrice >= analysis.sma10 ? 'Bullish (Above SMA 10)' : 'Bearish (Below SMA 10)') : 'Calculating…'}
+          <span>Fast / Slow Spread:</span>
+          <span className={ema9 >= ema21 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+            {(ema9 - ema21).toFixed(pip)}
           </span>
         </div>
       </div>
