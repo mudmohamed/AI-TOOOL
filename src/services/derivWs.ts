@@ -144,7 +144,9 @@ class DerivWebSocketService {
           if (accessToken && oauthExpiry > Date.now() + 15000) {
             setTimeout(() => {
               if (!this.accountInfo.isAuthorized || this.isPracticeSession) {
-                void this.connectOAuthAccount(accessToken, 'REAL');
+                const lastMode =
+                  localStorage.getItem('deriv_oauth_last_account_mode') === 'DEMO' ? 'DEMO' : 'REAL';
+                void this.connectOAuthAccount(accessToken, lastMode);
               }
             }, 350);
           } else {
@@ -180,6 +182,8 @@ class DerivWebSocketService {
       }
 
       if (oauthCode) {
+        const requestedMode: AccountMode =
+          sessionStorage.getItem('deriv_oauth_account_mode') === 'DEMO' ? 'DEMO' : 'REAL';
         const expectedState = sessionStorage.getItem('deriv_oauth_state') || '';
         const codeVerifier = sessionStorage.getItem('deriv_oauth_code_verifier') || '';
         const clientId = sessionStorage.getItem('deriv_oauth_client_id') || this.getStoredOAuthClientId();
@@ -225,10 +229,11 @@ class DerivWebSocketService {
           sessionStorage.removeItem('deriv_oauth_code_verifier');
           sessionStorage.removeItem('deriv_oauth_client_id');
           sessionStorage.removeItem('deriv_oauth_redirect_uri');
+          sessionStorage.removeItem('deriv_oauth_account_mode');
         } catch {}
         try { window.history.replaceState({}, document.title, window.location.pathname); } catch {}
 
-        const ok = await this.connectOAuthAccount(accessToken, 'REAL');
+        const ok = await this.connectOAuthAccount(accessToken, requestedMode);
         if (!ok) {
           try {
             localStorage.removeItem('deriv_oauth_access_token_real');
@@ -755,7 +760,7 @@ class DerivWebSocketService {
       return false;
     }
 
-    await this.beginOAuthLogin(clientId);
+    await this.beginOAuthLogin(clientId, mode);
     return false;
   }
 
@@ -767,7 +772,11 @@ class DerivWebSocketService {
     if (available?.demo !== false) accountsList.push({ loginid: 'DEMO', currency, is_virtual: true });
     if (available?.real) accountsList.push({ loginid: 'REAL', currency, is_virtual: false });
 
-    this.isPracticeSession = isVirtual;
+    this.isPracticeSession = false;
+    try {
+      localStorage.setItem('deriv_oauth_last_account_mode', isVirtual ? 'DEMO' : 'REAL');
+      localStorage.removeItem('deriv_virtual_practice');
+    } catch {}
     this.accountInfo = {
       isAuthorized: true,
       appId: 'oauth2',
@@ -782,9 +791,9 @@ class DerivWebSocketService {
     return this.openAccountSocket(wsUrl);
   }
 
-  private scheduleRealAccountReconnect(): void {
+  private scheduleBrokerAccountReconnect(): void {
     if (typeof window === 'undefined') return;
-    if (this.intentionalAccountClose || this.accountInfo.isVirtual) return;
+    if (this.intentionalAccountClose || this.isPracticeSession || !this.accountInfo.isAuthorized) return;
     if (this.accountReconnectTimeout) return;
 
     this.accountReconnectTimeout = setTimeout(() => {
@@ -795,13 +804,14 @@ class DerivWebSocketService {
         if (!accessToken || oauthExpiry <= Date.now() + 15000) {
           this.notifyHandlers({
             msg_type: 'auth_error',
-            error: 'Deriv REAL session expired. Press Connect Deriv again.',
+            error: 'Deriv account session expired. Press Connect Deriv again.',
           });
           this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
           this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
           return;
         }
-        void this.connectOAuthAccount(accessToken, 'REAL');
+        const mode: AccountMode = this.accountInfo.isVirtual ? 'DEMO' : 'REAL';
+        void this.connectOAuthAccount(accessToken, mode);
       } catch {
         this.notifyHandlers({
           msg_type: 'auth_error',
@@ -815,6 +825,14 @@ class DerivWebSocketService {
     return Boolean(
       this.accountInfo.isAuthorized &&
       !this.accountInfo.isVirtual &&
+      !this.isPracticeSession &&
+      this.accountWs?.readyState === WebSocket.OPEN
+    );
+  }
+
+  public isTradingReady(): boolean {
+    return Boolean(
+      this.accountInfo.isAuthorized &&
       !this.isPracticeSession &&
       this.accountWs?.readyState === WebSocket.OPEN
     );
@@ -900,8 +918,8 @@ class DerivWebSocketService {
         this.proposalMeta.clear();
         this.openContracts.clear();
         this.notifyHandlers({ msg_type: 'account_connection_status', connected: false });
-        if (!this.intentionalAccountClose && !this.accountInfo.isVirtual) {
-          this.scheduleRealAccountReconnect();
+        if (!this.intentionalAccountClose && !this.isPracticeSession && this.accountInfo.isAuthorized) {
+          this.scheduleBrokerAccountReconnect();
         }
         finish(false);
       };
@@ -1309,7 +1327,7 @@ class DerivWebSocketService {
     } catch {}
   }
 
-  public async beginOAuthLogin(clientId?: string): Promise<void> {
+  public async beginOAuthLogin(clientId?: string, mode: AccountMode = 'REAL'): Promise<void> {
     if (typeof window === 'undefined') return;
     const cleanClientId = (clientId || this.getStoredOAuthClientId()).trim();
     if (!cleanClientId) {
@@ -1337,6 +1355,7 @@ class DerivWebSocketService {
     sessionStorage.setItem('deriv_oauth_state', state);
     sessionStorage.setItem('deriv_oauth_client_id', cleanClientId);
     sessionStorage.setItem('deriv_oauth_redirect_uri', redirectUri);
+    sessionStorage.setItem('deriv_oauth_account_mode', mode);
 
     const url = new URL('https://auth.deriv.com/oauth2/auth');
     url.searchParams.set('response_type', 'code');
@@ -1614,7 +1633,7 @@ class DerivWebSocketService {
   }
 
   public placeContract(params: PlaceContractParams): boolean {
-    if (this.isPracticeSession || this.accountInfo.isVirtual) {
+    if (this.isPracticeSession) {
       return this.placeVirtualPracticeContract(params);
     }
 
@@ -1623,7 +1642,7 @@ class DerivWebSocketService {
         msg_type: 'trade_error',
         clientTradeId: params.clientTradeId,
         stage: 'preflight',
-        error: 'REAL account is not connected. Press Connect Deriv first.',
+        error: 'Deriv account is not connected. Press Connect Deriv first.',
       });
       return false;
     }
@@ -1633,9 +1652,9 @@ class DerivWebSocketService {
         msg_type: 'trade_error',
         clientTradeId: params.clientTradeId,
         stage: 'preflight',
-        error: 'REAL trading connection is reconnecting. No practice order was placed.',
+        error: `${this.accountInfo.isVirtual ? 'DEMO' : 'REAL'} Deriv trading connection is reconnecting. No simulated order was placed.`,
       });
-      this.scheduleRealAccountReconnect();
+      this.scheduleBrokerAccountReconnect();
       return false;
     }
 
@@ -1722,9 +1741,9 @@ class DerivWebSocketService {
         msg_type: 'trade_error',
         clientTradeId: params.clientTradeId,
         stage: 'proposal',
-        error: 'REAL proposal could not be sent because the Deriv trading socket is not open.',
+        error: 'Deriv proposal could not be sent because the authenticated trading socket is not open.',
       });
-      this.scheduleRealAccountReconnect();
+      this.scheduleBrokerAccountReconnect();
     }
     return sent;
   }
