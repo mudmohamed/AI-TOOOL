@@ -838,18 +838,13 @@ export default function App() {
       return;
     }
 
-    try {
-      const oauthClientId = localStorage.getItem('deriv_oauth_client_id') || '';
-      if (oauthClientId.trim()) {
-        await derivService.beginOAuthLogin(oauthClientId.trim());
-        return;
-      }
-    } catch {}
+    const oauthClientId = derivService.getStoredOAuthClientId();
+    if (!oauthClientId) {
+      showNotice('Deriv OAuth login is not configured for this deployment yet.');
+      return;
+    }
 
-    // Exact one-click legacy flow shown in the reference video:
-    // Connect Deriv -> Deriv authorization page -> callback to this app.
-    // If a modern OAuth2 client ID is later saved, beginOAuthLogin() above takes over.
-    window.location.assign(derivService.getOAuthUrl('1089'));
+    await derivService.beginOAuthLogin(oauthClientId);
   };
 
   const handleToggleAccountMode = async (requested: AccountMode) => {
