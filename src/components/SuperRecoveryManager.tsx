@@ -79,13 +79,13 @@ export const SuperRecoveryManager: React.FC<SuperRecoveryManagerProps> = ({
     baseStake: 1.0,
     payoutRate: CONTRACT_PAYOUT_PRESETS[recommendedContract]?.payoutRate || 1.95,
     recoveryStrategy: 'X2_SUPER_RECOVERY',
-    takeProfit: 10000.0,
-    stopLoss: 10000.0,
+    takeProfit: 50.0,
+    stopLoss: 100.0,
     maxConsecutiveLosses: 6,
     contractType: (recommendedContract as any) || 'DIFFERS',
     autoNextTrade: autoNextTrade ?? false,
-    profitLockEnabled: false,
-    profitLockTarget: 10000.0,
+    profitLockEnabled: true,
+    profitLockTarget: 50.0,
   });
 
   // Local fallback for autoNextTrade if not provided as controlled prop
