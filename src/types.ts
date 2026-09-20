@@ -233,27 +233,31 @@ export interface BacktestResult {
 }
 
 export interface AutoMatchesConfig {
-  market?: string;
-  stake: number;
-  winAmount?: number;
-  expectedProfit?: number;
-  maxAcceptableLoss?: number;
-  nextTradeCondition?: 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN' | 'FIXED_STAKE';
-  martingaleFactor?: number;
-  restartOnError?: boolean;
-  executionSpeed: 'FAST' | 'NORMAL';
-  targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS';
+  market?: string; // Default '1HZ10V' (Volatility 10 (1s) Index)
+  stake: number; // Initial Amount chosen by user (e.g. 0.35 USD)
+  winAmount?: number; // Win Amount (resets to initial amount, e.g. 0.35 USD)
+  maxStakeCap?: number; // STRICT CEILING: Trade stake will NEVER exceed this under any circumstance!
+  fixedStakeMode?: boolean; // When true: strictly trade at user chosen stake, NEVER escalate!
+  maxAllowedLosses?: number; // Stop/pause after N consecutive losses to protect account (e.g. 3)
+  expectedProfit?: number; // Expected Profit target ($20.00)
+  maxAcceptableLoss?: number; // Max Acceptable Loss ($50.00)
+  nextTradeCondition?: 'FIXED_STAKE' | 'MARTINGALE' | 'SAME_LOSS_RECOVERY' | 'RESET_ON_WIN';
+  martingaleFactor?: number; // e.g. 1.15
+  restartOnError?: boolean; // RESTARTONERROR: TRUE
+  executionSpeed: 'TURBO' | 'FAST' | 'NORMAL';
+  targetStrategy: 'REPEAT_ENTRY' | 'MARKOV_TRANSITION' | 'HOTTEST_CLUSTER' | 'CUSTOM' | 'COLD_DIFFERS' | 'DIFFERS_SAFE_GROWTH';
   customTargetDigit?: number;
-  // Safety & 24/7 Controls
-  stopConditionMode?: 'ONLY_MANUAL_OR_TARGET' | 'STOP_ON_MAX_LOSS';
-  profitShieldActive?: boolean;
+  contractMode?: 'MATCHES' | 'DIFFERS' | 'OVER_UNDER' | 'EVEN_ODD';
+  onlyWhenSignalConfirmed?: boolean;
+  minConfidenceThreshold?: number; // e.g. 70%
+  stopConditionMode?: 'NEVER_STOP_UNTIL_MANUAL' | 'ONLY_MANUAL_OR_TARGET' | 'STOP_ON_MAX_LOSS'; // Default 'ONLY_MANUAL_OR_TARGET'
+  targetProfitPercentage?: number; // Target 100%
+  profitShieldActive?: boolean; // Default true: 100% protect won profits
+  profitShieldPercent?: number; // e.g. 80% or 100%
+  vaultedWonProfits?: number; // Total profits permanently vaulted
+  // Runtime compatibility fields retained by the current UI.
   profitLockEnabled?: boolean;
   profitLockTarget?: number;
-  fixedStakeMode?: boolean;
-  maxStakeCap?: number;
-  maxAllowedLosses?: number;
-  contractMode?: 'DIFFERS' | 'OVER_UNDER' | 'MATCHES';
-  onlyWhenSignalConfirmed?: boolean;
 }
 
 export interface DBotXmlDefinition {
