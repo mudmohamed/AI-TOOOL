@@ -75,23 +75,18 @@ export const Header: React.FC<HeaderProps> = ({
     ? accountInfo.isVirtual
       ? 'DEMO'
       : 'REAL'
-    : 'DEMO';
+    : accountMode;
   const displayBalance = accountInfo?.isAuthorized && accountInfo.balance !== undefined
     ? accountInfo.balance.toFixed(2)
     : '—';
 
   const selectTradingMode = React.useCallback((requested: AccountMode) => {
-    if (requested === 'REAL') {
-      const hasRealToken = typeof localStorage !== 'undefined' && Boolean(localStorage.getItem('deriv_token_real'));
-      if (!accountInfo?.isAuthorized || accountInfo?.isVirtual) {
-        if (!hasRealToken) {
-          if (onOpenConnectDeriv) onOpenConnectDeriv();
-          return;
-        }
-      }
+    if (requested === 'REAL' && (!accountInfo?.isAuthorized || accountInfo?.isVirtual)) {
+      onToggleAccountMode('REAL');
+      return;
     }
     onToggleAccountMode(requested);
-  }, [accountInfo?.isAuthorized, accountInfo?.isVirtual, onOpenConnectDeriv, onToggleAccountMode]);
+  }, [accountInfo?.isAuthorized, accountInfo?.isVirtual, onToggleAccountMode]);
 
   const getActiveBotLabel = () => {
     switch (activeBot) {
@@ -205,10 +200,10 @@ export const Header: React.FC<HeaderProps> = ({
                 type="button"
                 onClick={onOpenConnectDeriv}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-bold transition cursor-pointer shadow-sm"
-                title="Connect Deriv (API Token / Instant Demo)"
+                title="Connect Deriv"
               >
                 <Zap className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400/30" />
-                <span>CONNECT ACCOUNT</span>
+                <span>Connect Deriv</span>
               </button>
             )}
 
