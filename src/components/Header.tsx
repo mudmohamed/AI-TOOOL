@@ -64,6 +64,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAuth,
   userProfile,
   accountInfo,
+  accountMode,
   onToggleAccountMode,
   activeBot,
   onStopActiveBot,
