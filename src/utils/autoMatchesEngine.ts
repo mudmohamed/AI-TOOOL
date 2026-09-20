@@ -67,15 +67,18 @@ export function findBestAutoMatchesTarget(
     };
   }
 
+  // 1. Markov transition probability from the current last digit
   const markovMatrix = calculateMarkovTransitionMatrix(digits);
   const nextProbabilities = markovMatrix[currentDigit] || Array(10).fill(0.1);
 
+  // 2. Micro-cluster analysis in recent 30 ticks
   const recentSlice = digits.slice(-30);
   const microCounts: number[] = Array(10).fill(0);
   recentSlice.forEach((d) => {
     if (d >= 0 && d <= 9) microCounts[d]++;
   });
 
+  // 3. Score each digit 0-9
   let bestDigit = currentDigit;
   let highestScore = -1;
   let bestMarkovProb = 0;
@@ -85,16 +88,21 @@ export function findBestAutoMatchesTarget(
 
   for (let d = 0; d < 10; d++) {
     const stat = digitStats.find((s) => s.digit === d);
-    const overallFreq = stat ? stat.percentage : 10;
-    const markovProbPct = (nextProbabilities[d] ?? 0.1) * 100;
-    const microFreqPct = (microCounts[d] / recentSlice.length) * 100;
+    const overallFreq = stat ? stat.percentage : 10; // e.g. 14.5%
+    const markovProbPct = (nextProbabilities[d] ?? 0.1) * 100; // e.g. 18.2%
+    const microFreqPct = (microCounts[d] / recentSlice.length) * 100; // e.g. 16.6%
     const delay = stat ? stat.delay : 5;
 
+    // Weighting:
+    // 45% + sampleProgress * 10% Markov transition probability
+    // 30% Micro-cluster momentum (recent surge)
+    // 25% - sampleProgress * 10% Overall sample frequency
     let compositeScore =
       markovProbPct * (0.45 + 0.1 * sampleProgress) +
       microFreqPct * 0.3 +
       overallFreq * (0.25 - 0.1 * sampleProgress);
 
+    // Minor penalty if delay is excessive (>35 ticks without appearance)
     if (delay > 35) {
       compositeScore *= 0.88;
     }
@@ -111,10 +119,12 @@ export function findBestAutoMatchesTarget(
   const histFreq = stat ? stat.percentage : 10;
   const delay = stat ? stat.delay : 0;
 
+  // Normalized confidence score (scaled for display)
   const normalizedConfidence = Number(
     Math.max(10, Math.min(99, highestScore * 3.2 + 35)).toFixed(1)
   );
 
+  // Trigger ready only when statistical edge is confirmed
   const isTriggerReady =
     digits.length >= 60 &&
     highestScore >= 13.0 &&
@@ -145,6 +155,7 @@ export function findBestDiffersTarget(
   currentDigit: number
 ): { targetDigit: number; winProbability: number; rationale: string } {
   if (digits.length < 20) {
+    // Avoid the current digit by default
     const fallback = (currentDigit + 5) % 10;
     return {
       targetDigit: fallback,
@@ -156,12 +167,14 @@ export function findBestDiffersTarget(
   const markovMatrix = calculateMarkovTransitionMatrix(digits);
   const nextProbabilities = markovMatrix[currentDigit] || Array(10).fill(0.1);
 
+  // Recent 30 counts
   const recentSlice = digits.slice(-30);
   const microCounts: number[] = Array(10).fill(0);
   recentSlice.forEach((d) => {
     if (d >= 0 && d <= 9) microCounts[d]++;
   });
 
+  // Find lowest probability digit following currentDigit
   let lowestScore = 9999;
   let coldestDigit = (currentDigit + 5) % 10;
 
@@ -184,6 +197,13 @@ export function findBestDiffersTarget(
   };
 }
 
+/**
+ * EXACT "Same Losing Price" Super Recovery X2 / X4 Calculator
+ * Formula:
+ * NextStake = (CumulativeLoss + (Multiplier * BaseProfit)) / NetPayoutRate
+ * where Multiplier = 2 for X2 (recovers 100% loss + locks in 2x base profit)
+ * and Multiplier = 4 for X4 (recovers 100% loss + locks in 4x base profit)
+ */
 export interface SameLosingPriceRecoveryResult {
   nextStake: number;
   cumulativeLoss: number;
@@ -201,13 +221,14 @@ export function calculateSameLosingPriceRecovery(
   baseStake: number,
   cumulativeLoss: number,
   consecutiveLosses: number,
-  payoutRate: number,
+  payoutRate: number, // Deriv gross payout (e.g. 9.34 for matches, 1.09 for differs, 1.95 for rise/fall)
   mode: 'X2_SUPER_RECOVERY' | 'X4_SUPER_RECOVERY',
   stopLossLimit: number = 100
 ): SameLosingPriceRecoveryResult {
   const multiplier = mode === 'X4_SUPER_RECOVERY' ? 4 : 2;
   const targetNetProfit = Number((baseStake * multiplier).toFixed(2));
 
+  // If no losses, trade at baseStake
   if (consecutiveLosses === 0 || cumulativeLoss <= 0) {
     const netRate = payoutRate > 1.5 ? payoutRate - 1 : payoutRate;
     const grossPayout = Number((baseStake * payoutRate).toFixed(2));
@@ -226,10 +247,13 @@ export function calculateSameLosingPriceRecovery(
     };
   }
 
+  // Net rate = (payout - 1)
   const netRate = payoutRate > 1.5 ? payoutRate - 1 : payoutRate;
   const safeNetRate = Math.max(0.08, netRate);
 
+  // Exact formula: (Cumulative Loss + Target Profit) / Net Rate
   const rawStake = (cumulativeLoss + targetNetProfit) / safeNetRate;
+  // Deriv minimum stake is $0.35
   const nextStake = Math.max(0.35, Number(rawStake.toFixed(2)));
 
   const totalAtRisk = cumulativeLoss + nextStake;
