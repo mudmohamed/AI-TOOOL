@@ -39,12 +39,7 @@ class DerivWebSocketService {
   private publicEndpointIndex = 0;
 
   private getPublicEndpoints(): string[] {
-    const appId = this.getStoredAppId() || '1089';
-    return [
-      'wss://api.derivws.com/trading/v1/options/ws/public',
-      `wss://ws.derivws.com/websockets/v3?app_id=${appId}`,
-      `wss://ws.binaryws.com/websockets/v3?app_id=${appId}`,
-    ];
+    return ['wss://api.derivws.com/trading/v1/options/ws/public'];
   }
 
   private get publicEndpoints(): string[] {
@@ -129,9 +124,7 @@ class DerivWebSocketService {
   private activeFocusSymbol = '1HZ10V';
 
   constructor() {
-    this.initializeSeedData();
     this.connect();
-    this.startSimulationFallback();
     if (typeof window !== 'undefined') {
       const search = new URLSearchParams(window.location.search);
       const hasOAuthCallback = search.has('code') || search.has('error');
@@ -995,9 +988,30 @@ class DerivWebSocketService {
         return;
       }
 
+      // Do not purchase a quote that exceeds the strategy's chosen stake cap.
+      if (askPrice > meta.amount + 1e-8) {
+        this.notifyHandlers({
+          msg_type: 'trade_error',
+          clientTradeId: meta.clientTradeId,
+          stage: 'proposal',
+          error: `Deriv quote ${askPrice.toFixed(2)} exceeded chosen stake ${meta.amount.toFixed(2)}. Order skipped.`,
+        });
+        return;
+      }
+
       const buyReqId = this.nextPrivateReqId();
       this.buyRequests.set(buyReqId, meta);
-      this.sendAccount({ buy: proposal.id, price: askPrice, req_id: buyReqId });
+      const sent = this.sendAccount({ buy: proposal.id, price: askPrice, req_id: buyReqId });
+      if (!sent) {
+        this.buyRequests.delete(buyReqId);
+        this.notifyHandlers({
+          msg_type: 'trade_error',
+          clientTradeId: meta.clientTradeId,
+          stage: 'buy',
+          error: 'Verified Deriv proposal could not be purchased because the trading socket closed.',
+        });
+        this.scheduleBrokerAccountReconnect();
+      }
       return;
     }
 
@@ -1633,8 +1647,7 @@ class DerivWebSocketService {
         ? String(params.barrier)
         : undefined;
 
-    // IMPORTANT: execution transport must never alter the master strategy's
-    // selected stake, target digit, contract type, symbol, or duration.
+    // Transport passes the master strategy output through unchanged.
     const meta: TradeRequestMeta = {
       clientTradeId: params.clientTradeId,
       contractType: params.contract_type,
@@ -1646,43 +1659,32 @@ class DerivWebSocketService {
     };
 
     const reqId = this.nextPrivateReqId();
-    this.buyRequests.set(reqId, meta);
+    this.proposalRequests.set(reqId, meta);
 
-    // Match the untouched system's zero-extra-round-trip execution:
-    // Deriv currently supports buy with contract parameters directly.
-    const parameters: any = {
+    // Current Deriv Options flow used by the proven executor:
+    // proposal -> verify returned quote -> buy proposal ID -> monitor official settlement.
+    const proposalRequest: any = {
+      proposal: 1,
       amount,
       basis: 'stake',
       contract_type: params.contract_type,
-      currency: this.accountInfo.currency || 'USD',
+      currency: (this.accountInfo.currency || 'USD').toUpperCase(),
       duration: params.duration || 1,
       duration_unit: params.duration_unit || 't',
-      symbol: params.symbol,
-    };
-
-    if (barrier !== undefined) parameters.barrier = barrier;
-
-    const request: any = {
-      buy: 1,
-      price: amount,
-      parameters,
+      underlying_symbol: params.symbol,
       req_id: reqId,
-      passthrough: {
-        clientTradeId: params.clientTradeId,
-        symbol: params.symbol,
-        contract_type: params.contract_type,
-        target_value: barrier,
-      },
     };
 
-    const sent = this.sendAccount(request);
+    if (barrier !== undefined) proposalRequest.barrier = barrier;
+
+    const sent = this.sendAccount(proposalRequest);
     if (!sent) {
-      this.buyRequests.delete(reqId);
+      this.proposalRequests.delete(reqId);
       this.notifyHandlers({
         msg_type: 'trade_error',
         clientTradeId: params.clientTradeId,
-        stage: 'buy',
-        error: 'Deriv buy request could not be sent because the authenticated trading socket is not open.',
+        stage: 'proposal',
+        error: 'Deriv proposal could not be sent because the authenticated trading socket is not open.',
       });
       this.scheduleBrokerAccountReconnect();
     }
