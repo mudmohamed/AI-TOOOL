@@ -110,25 +110,19 @@ export default function App() {
   const currentSymbolRef = useRef(currentSymbol);
   currentSymbolRef.current = currentSymbol;
 
-  const initialMarketSeed = derivService.getInitialMarketData('1HZ10V');
   const [connected, setConnected] = useState(false);
   const [latency, setLatency] = useState(0);
   const [totalTicksReceived, setTotalTicksReceived] = useState(0);
   const [sampleSize, setSampleSize] = useState(500);
-  const [prices, setPrices] = useState<number[]>(() => initialMarketSeed.prices);
-  const [digits, setDigits] = useState<number[]>(() => initialMarketSeed.digits);
-  const [currentPrice, setCurrentPrice] = useState(() => initialMarketSeed.currentPrice);
-  const [lastDigit, setLastDigit] = useState(() => initialMarketSeed.lastDigit);
+  const [prices, setPrices] = useState<number[]>([]);
+  const [digits, setDigits] = useState<number[]>([]);
+  const [currentPrice, setCurrentPrice] = useState(0);
+  const [lastDigit, setLastDigit] = useState(0);
   const [pip, setPip] = useState(() => derivService.getPipSize('1HZ10V'));
 
-  const [marketAnalyses, setMarketAnalyses] = useState<Record<string, MarketAnalysis>>(() => {
-    const map: Record<string, MarketAnalysis> = {};
-    POPULAR_SYMBOLS.forEach((s) => {
-      const data = derivService.getInitialMarketData(s.symbol);
-      map[s.symbol] = evaluateMarketStrength(s.symbol, s.name, data.prices, data.digits);
-    });
-    return map;
-  });
+  // REAL-only market state: do not rank or trade any market until actual
+  // Deriv history/ticks have populated it.
+  const [marketAnalyses, setMarketAnalyses] = useState<Record<string, MarketAnalysis>>({});
   const marketAnalysesRef = useRef(marketAnalyses);
   marketAnalysesRef.current = marketAnalyses;
   const marketTickDataRef = useRef<Record<string, { prices: number[]; digits: number[] }>>({});
@@ -423,6 +417,15 @@ export default function App() {
       (trade) => trade.status === 'PENDING' && trade.symbol === currentSym
     );
     if (hasPending) return;
+
+    const liveSample = marketTickDataRef.current[currentSym];
+    if (!liveSample || liveSample.digits.length < 20 || liveSample.prices.length < 20) {
+      if (!historyPendingRef.current.has(currentSym)) {
+        historyPendingRef.current.add(currentSym);
+        derivService.requestTickHistory(currentSym, 1000);
+      }
+      return;
+    }
 
     const account = accountInfoRef.current;
     if (!account.isAuthorized || derivService.isVirtualPracticeMode()) {
