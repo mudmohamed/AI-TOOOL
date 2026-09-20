@@ -1215,12 +1215,25 @@ class DerivWebSocketService {
   }
 
   public getStoredOAuthClientId(): string {
+    const runtimeClientId =
+      typeof window !== 'undefined' && window.location.hostname === 'fasterpro-analyzer.vercel.app'
+        ? '34fkCK7WCZitS6ErgTpFY'
+        : '';
     const buildClientId = String(import.meta.env.VITE_DERIV_OAUTH_CLIENT_ID || '').trim();
     try {
-      return buildClientId || localStorage.getItem('deriv_oauth_client_id') || '';
+      return runtimeClientId || buildClientId || localStorage.getItem('deriv_oauth_client_id') || '';
     } catch {
-      return buildClientId;
+      return runtimeClientId || buildClientId;
     }
+  }
+
+  private getOAuthRedirectUri(): string {
+    if (typeof window === 'undefined') return '';
+    if (window.location.hostname === 'fasterpro-analyzer.vercel.app') {
+      return 'https://fasterpro-analyzer.vercel.app/oauth/callback';
+    }
+    const configured = String(import.meta.env.VITE_DERIV_OAUTH_REDIRECT_URI || '').trim();
+    return configured || `${window.location.origin}/`;
   }
 
   public setStoredOAuthClientId(clientId: string): void {
@@ -1252,7 +1265,7 @@ class DerivWebSocketService {
       .replace(/=+$/, '');
     const stateBytes = crypto.getRandomValues(new Uint8Array(16));
     const state = Array.from(stateBytes, (value) => value.toString(16).padStart(2, '0')).join('');
-    const redirectUri = `${window.location.origin}/`;
+    const redirectUri = this.getOAuthRedirectUri();
 
     this.setStoredOAuthClientId(cleanClientId);
     sessionStorage.setItem('deriv_oauth_code_verifier', codeVerifier);
@@ -1264,7 +1277,7 @@ class DerivWebSocketService {
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', cleanClientId);
     url.searchParams.set('redirect_uri', redirectUri);
-    url.searchParams.set('scope', 'trade account_manage');
+    url.searchParams.set('scope', 'trade');
     url.searchParams.set('state', state);
     url.searchParams.set('code_challenge', codeChallenge);
     url.searchParams.set('code_challenge_method', 'S256');
