@@ -369,11 +369,6 @@ export default function App() {
       return false;
     }
 
-    // Auto-unlock watchdog in case network takes longer
-    setTimeout(() => {
-      autoDispatchLockRef.current = false;
-    }, 2500);
-
     playOrderDispatchedSound();
     return true;
   }, [currentPrice, showNotice]);
@@ -615,8 +610,11 @@ export default function App() {
         setConnected(Boolean(data.connected));
         if (data.connected) {
           derivService.subscribeMultipleTicks(POPULAR_SYMBOLS.map((item) => item.symbol));
+          derivService.requestTickHistory(currentSymbolRef.current, 1000);
           POPULAR_SYMBOLS.forEach((item, index) => {
-            setTimeout(() => derivService.requestTickHistory(item.symbol, 500), index * 80);
+            if (item.symbol !== currentSymbolRef.current) {
+              setTimeout(() => derivService.requestTickHistory(item.symbol, 300), (index + 1) * 150);
+            }
           });
         } else {
           autoDispatchLockRef.current = false;
@@ -669,8 +667,8 @@ export default function App() {
         if (!symbol || !Number.isFinite(quote)) return;
         const tickDigit = derivService.extractLastDigit(quote, symbol);
         const previous = marketTickDataRef.current[symbol] || { prices: [], digits: [] };
-        const updatedPrices = [...previous.prices, quote].slice(-2000);
-        const updatedDigits = [...previous.digits, tickDigit].slice(-2000);
+        const updatedPrices = [...previous.prices, quote].slice(-1000);
+        const updatedDigits = [...previous.digits, tickDigit].slice(-1000);
         marketTickDataRef.current[symbol] = { prices: updatedPrices, digits: updatedDigits };
         setTotalTicksReceived((count) => count + 1);
 
@@ -701,23 +699,7 @@ export default function App() {
         }
         if (!derivService.getConnectionState().connected) return;
 
-        // Clear stale pending trades (older than 3.5s) to guarantee no execution lockup
-        const now = Date.now();
-        const activePending = pendingTradesRef.current.filter((trade) => trade.status === 'PENDING' && (now - trade.timestamp) < 3500);
-        if (activePending.length !== pendingTradesRef.current.length) {
-          syncPendingTrades(() => activePending);
-        }
-        if (activePending.length > 0) return;
-
-        // Auto-dispatch watchdog: if lock was held > 2.5s, auto-release to ensure continuous trading
-        if (autoDispatchLockRef.current) {
-          if (now - lastDispatchTimeRef.current > 2500) {
-            autoDispatchLockRef.current = false;
-          } else {
-            return;
-          }
-        }
-
+        // Master pending/dispatch locks are enforced inside dispatchNextAutoTrade.
         if (autoMatchesActiveRef.current && symbol === currentSymbolRef.current) {
           dispatchNextAutoTradeRef.current?.(quote, tickDigit);
           return;
@@ -878,6 +860,33 @@ export default function App() {
 
     return unsubscribe;
   }, [handleStopAllBots, persistSettlement, showNotice]);
+
+  // Untouched master fail-safe: purge genuinely stuck orders after 6 seconds,
+  // then resume the event-driven stream from the latest real tick.
+  useEffect(() => {
+    const watchdogInterval = setInterval(() => {
+      if (!autoMatchesActiveRef.current) return;
+      const now = Date.now();
+      const current = pendingTradesRef.current;
+      const stuck = current.filter(
+        (trade) => trade.status === 'PENDING' && now - trade.timestamp > 6000
+      );
+      if (stuck.length > 0) {
+        const remaining = current.filter(
+          (trade) => !(trade.status === 'PENDING' && now - trade.timestamp > 6000)
+        );
+        syncPendingTrades(() => remaining);
+        autoDispatchLockRef.current = false;
+        const symbol = currentSymbolRef.current;
+        const price = derivService.getCurrentPrice(symbol);
+        const digit =
+          price !== undefined ? derivService.extractLastDigit(price, symbol) : lastDigit;
+        dispatchNextAutoTradeRef.current?.(price, digit);
+      }
+    }, 1500);
+
+    return () => clearInterval(watchdogInterval);
+  }, [lastDigit]);
 
   const handleSelectSymbol = (newSymbol: string) => {
     if (newSymbol === currentSymbolRef.current) return;
