@@ -167,67 +167,66 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 p-1.5 px-3 rounded-xl bg-slate-900 border border-slate-800 shadow-inner">
-            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
-            
-            {accountInfo?.isAuthorized ? (
-              <button
-                type="button"
-                onClick={onOpenConnectDeriv}
-                className="font-mono text-xs min-w-[118px] text-left hover:opacity-85 transition cursor-pointer"
-                title="Manage connected Deriv account"
-              >
-                <div className="font-extrabold text-white truncate max-w-[145px] flex items-center gap-1.5">
-                  <span>{accountInfo.loginId}</span>
-                  <span
-                    className={`text-[8px] px-1.5 py-0.2 rounded font-bold uppercase ${
-                      accountInfo.loginId === 'VRTC-PRACTICE'
-                        ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
-                        : accountInfo.isVirtual
-                        ? 'bg-amber-400/20 text-amber-300'
-                        : 'bg-emerald-500/20 text-emerald-300'
-                    }`}
-                  >
-                    {accountInfo.loginId === 'VRTC-PRACTICE' ? 'PRACTICE' : actualMode}
-                  </span>
-                </div>
-                <div className="text-[10px] text-slate-400">
-                  Balance: <span className="text-emerald-400 font-bold">{displayBalance} {accountInfo?.currency || 'USD'}</span>{latency > 0 ? ` • ${latency}ms` : ''}
-                </div>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={onOpenConnectDeriv}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-bold transition cursor-pointer shadow-sm"
-                title="Connect Deriv"
-              >
-                <Zap className="w-3.5 h-3.5 text-emerald-400 fill-emerald-400/30" />
-                <span>Connect Deriv</span>
-              </button>
-            )}
+          <div className="flex items-center gap-2 p-1.5 px-2 rounded-xl bg-slate-900 border border-slate-800 shadow-inner">
+            <div className="min-w-[72px] max-w-[112px] font-mono">
+              <div className="text-[9px] uppercase tracking-wider text-slate-500">Account</div>
+              <div className="text-[10px] font-black text-white truncate" title={accountInfo?.loginId || 'Not connected'}>
+                {accountInfo?.isAuthorized ? accountInfo.loginId : 'Not connected'}
+              </div>
+            </div>
 
-            <div className="flex items-center gap-1 rounded-lg bg-slate-950 p-0.5 border border-slate-800">
+            <div className="flex items-center gap-1 rounded-lg bg-slate-950 p-0.5 border border-slate-700">
               <button
                 type="button"
                 onClick={() => selectTradingMode('DEMO')}
-                className={`px-2 py-1 rounded-md text-[9px] font-black font-mono transition cursor-pointer ${accountInfo?.isAuthorized && actualMode === 'DEMO' ? 'bg-amber-400 text-slate-950' : 'text-amber-300 hover:bg-amber-400/15'}`}
-                title="Switch to Deriv DEMO account"
+                className={`px-2.5 py-1 rounded-md text-[9px] font-black font-mono transition cursor-pointer ${
+                  actualMode === 'DEMO'
+                    ? 'bg-slate-700 text-white border border-slate-500'
+                    : 'text-slate-300 hover:bg-slate-800'
+                }`}
+                title="Use Deriv demo/practice account"
               >
-                DEMO
+                Demo
               </button>
               <button
                 type="button"
                 onClick={() => selectTradingMode('REAL')}
-                className={`px-2 py-1 rounded-md text-[9px] font-black font-mono transition cursor-pointer ${accountInfo?.isAuthorized && actualMode === 'REAL' ? 'bg-emerald-500 text-slate-950' : 'text-emerald-300 hover:bg-emerald-500/15'}`}
-                title="Switch to Deriv REAL account"
+                className={`px-2.5 py-1 rounded-md text-[9px] font-black font-mono transition cursor-pointer ${
+                  actualMode === 'REAL'
+                    ? 'bg-emerald-500 text-slate-950 border border-emerald-300'
+                    : 'text-emerald-300 hover:bg-emerald-500/15'
+                }`}
+                title="Connect/use Deriv real account"
               >
-                REAL
+                Real
               </button>
             </div>
 
+            <div className="min-w-[72px] text-center font-mono leading-tight">
+              <div className="text-[8px] text-slate-400 font-bold uppercase">
+                Balance ({actualMode})
+              </div>
+              <div className="text-[11px] text-white font-black">
+                {accountInfo?.isAuthorized ? displayBalance : '0.00'} <span className="text-[8px] text-slate-400">{accountInfo?.currency || 'USD'}</span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={onOpenConnectDeriv}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-400 hover:bg-emerald-300 text-slate-950 text-[10px] sm:text-xs font-mono font-black transition cursor-pointer shadow-lg shadow-emerald-950/30 whitespace-nowrap"
+              title={accountInfo?.isAuthorized && !accountInfo?.isVirtual ? 'Manage Deriv real connection' : 'Connect Deriv real account'}
+            >
+              <Zap className="w-3.5 h-3.5 fill-slate-950/20" />
+              <span>Connect Deriv</span>
+            </button>
+
             {accountInfo?.isAuthorized && (
-              <button onClick={() => derivService.logout()} className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer" title="Disconnect Deriv session">
+              <button
+                onClick={() => derivService.logout()}
+                className="p-1 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer"
+                title="Disconnect Deriv session"
+              >
                 <LogOut className="w-3.5 h-3.5" />
               </button>
             )}
