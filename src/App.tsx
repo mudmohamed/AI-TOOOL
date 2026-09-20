@@ -291,13 +291,18 @@ export default function App() {
   }, [showNotice]);
 
   const handlePlaceTrade = useCallback((tradeData: TradeInput): boolean => {
-    let account = accountInfoRef.current;
+    const account = accountInfoRef.current;
     if (!account.isAuthorized) {
-      derivService.startVirtualPracticeSession(10000);
-      account = derivService.getAccountInfo();
-      accountInfoRef.current = account;
-      setAccountInfo(account);
-      showNotice('⚡ Instant $10,000 demo activated on real Deriv feed. Order sent!');
+      showNotice('REAL account is not connected. Press Connect Deriv first.');
+      autoDispatchLockRef.current = false;
+      return false;
+    }
+
+    if (!account.isVirtual && !derivService.isRealTradingReady()) {
+      showNotice('REAL trading connection is reconnecting. No order was placed.');
+      autoDispatchLockRef.current = false;
+      void derivService.connectTradingAccount('REAL');
+      return false;
     }
 
     const symbol = tradeData.symbol || currentSymbolRef.current;
@@ -470,16 +475,17 @@ export default function App() {
           setPip(derivService.getPipSize(symbol));
         }
 
-        let account = accountInfoRef.current;
+        const account = accountInfoRef.current;
         if (!account.isAuthorized) {
           if (autoMatchesActiveRef.current || activeBotRef.current !== 'NONE') {
-            derivService.startVirtualPracticeSession(10000);
-            account = derivService.getAccountInfo();
-            accountInfoRef.current = account;
-            setAccountInfo(account);
-          } else {
-            return;
+            autoDispatchLockRef.current = false;
+            showNotice('Trading paused: connect your Deriv account.');
           }
+          return;
+        }
+        if (!account.isVirtual && !derivService.isRealTradingReady()) {
+          autoDispatchLockRef.current = false;
+          return;
         }
         if (!derivService.getConnectionState().connected) return;
 
@@ -783,13 +789,23 @@ export default function App() {
   const requireAuthorizedBot = (bot: ActiveBotType): boolean => {
     if (!derivService.getConnectionState().connected) {
       derivService.connect();
+      showNotice('Waiting for the live Deriv market feed.');
+      return false;
     }
-    if (!accountInfoRef.current.isAuthorized) {
-      derivService.startVirtualPracticeSession(10000);
-      const acc = derivService.getAccountInfo();
-      accountInfoRef.current = acc;
-      setAccountInfo(acc);
+
+    const account = accountInfoRef.current;
+    if (!account.isAuthorized) {
+      showNotice('Connect Deriv before starting automated trading.');
+      setIsConnectModalOpen(true);
+      return false;
     }
+
+    if (!account.isVirtual && !derivService.isRealTradingReady()) {
+      showNotice('REAL account is connected but the trading socket is still reconnecting.');
+      void derivService.connectTradingAccount('REAL');
+      return false;
+    }
+
     setActiveBotSafe(bot);
     return true;
   };
@@ -822,9 +838,15 @@ export default function App() {
   };
 
   const handleExecuteBulkTrades = (trades: TradeInput[]) => {
-    if (!connected || !accountInfoRef.current.isAuthorized) {
+    const account = accountInfoRef.current;
+    if (!connected || !account.isAuthorized) {
       setIsConnectModalOpen(true);
-      showNotice('Please select DEMO or REAL in the Trading Account modal.');
+      showNotice('Connect Deriv before placing trades.');
+      return;
+    }
+    if (!account.isVirtual && !derivService.isRealTradingReady()) {
+      showNotice('REAL trading connection is not ready yet. No orders were sent.');
+      void derivService.connectTradingAccount('REAL');
       return;
     }
     trades.forEach((trade, index) => {
@@ -893,8 +915,15 @@ export default function App() {
   };
 
   const handleToggleAutoNextTrade = (enabled: boolean) => {
-    if (enabled && (!connected || !accountInfoRef.current.isAuthorized)) {
+    const account = accountInfoRef.current;
+    if (enabled && (!connected || !account.isAuthorized)) {
       setIsConnectModalOpen(true);
+      showNotice('Connect Deriv before starting automated trading.');
+      return;
+    }
+    if (enabled && !account.isVirtual && !derivService.isRealTradingReady()) {
+      showNotice('REAL trading connection is not ready yet.');
+      void derivService.connectTradingAccount('REAL');
       return;
     }
     setAutoNextTrade(enabled);
