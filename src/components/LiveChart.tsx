@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { calculateEMASeries, calculateBollingerBands, calculateSMA, calculateSMASeries } from '../utils/indicators';
+import { calculateEMASeries, calculateBollingerBands } from '../utils/indicators';
+import { calculateSMA, calculateSMASeries } from '../utils/chartCompat';
 import { Eye, EyeOff, Maximize2, RefreshCw } from 'lucide-react';
 
 interface LiveChartProps {
