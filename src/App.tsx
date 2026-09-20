@@ -180,6 +180,7 @@ export default function App() {
   const [lastSettledTrade, setLastSettledTrade] = useState<TradeRecord | null>(null);
   const [lastSettledToast, setLastSettledToast] = useState<{ id: string; won: boolean; text: string } | null>(null);
   const clientCounterRef = useRef(0);
+  const queuedBulkWaveRef = useRef<TradeInput[] | null>(null);
 
   const [watchlist, setWatchlist] = useState<string[]>(() => {
     try {
@@ -299,6 +300,7 @@ export default function App() {
     setAutoNextTrade(false);
     autoNextTradeRef.current = false;
     autoDispatchLockRef.current = false;
+    queuedBulkWaveRef.current = null;
     showNotice('Automated trading stopped. Existing Deriv contracts continue to settlement.', 3000);
   }, [showNotice]);
 
@@ -375,6 +377,38 @@ export default function App() {
 
   const handlePlaceTradeRef = useRef(handlePlaceTrade);
   handlePlaceTradeRef.current = handlePlaceTrade;
+
+
+  const flushQueuedBulkWave = () => {
+    const wave = queuedBulkWaveRef.current;
+    if (!wave?.length || activeBotRef.current !== 'BULK_AUTO') return false;
+
+    const account = accountInfoRef.current;
+    if (!account.isAuthorized || derivService.isVirtualPracticeMode()) return false;
+    if (!derivService.getConnectionState().connected || !derivService.isTradingReady()) return false;
+
+    queuedBulkWaveRef.current = null;
+    const unsent: TradeInput[] = [];
+
+    // Original system semantics: dispatch the whole wave in the same event loop,
+    // with no artificial per-market delay.
+    wave.forEach((trade) => {
+      const ok = handlePlaceTradeRef.current({ ...trade });
+      if (!ok) unsent.push(trade);
+    });
+
+    if (unsent.length) {
+      queuedBulkWaveRef.current = unsent;
+      const mode: AccountMode = account.isVirtual ? 'DEMO' : 'REAL';
+      void derivService.connectTradingAccount(mode);
+      return false;
+    }
+
+    showNotice(`Bulk wave sent to Deriv: ${wave.length} markets.`, 2500);
+    return true;
+  };
+  const flushQueuedBulkWaveRef = useRef(flushQueuedBulkWave);
+  flushQueuedBulkWaveRef.current = flushQueuedBulkWave;
 
 
   // Master ZIP zero-latency event-driven Auto-Matches dispatcher.
@@ -616,6 +650,7 @@ export default function App() {
               setTimeout(() => derivService.requestTickHistory(item.symbol, 300), (index + 1) * 150);
             }
           });
+          setTimeout(() => flushQueuedBulkWaveRef.current(), 0);
         } else {
           autoDispatchLockRef.current = false;
         }
@@ -646,6 +681,9 @@ export default function App() {
 
           if (autoMatchesActiveRef.current) {
             dispatchNextAutoTradeRef.current?.(livePrice, liveDigit);
+          }
+          if (activeBotRef.current === 'BULK_AUTO' && queuedBulkWaveRef.current?.length) {
+            flushQueuedBulkWaveRef.current();
           }
         }
         return;
@@ -720,6 +758,10 @@ export default function App() {
         if (!derivService.getConnectionState().connected) {
           derivService.connect();
           return;
+        }
+
+        if (activeBotRef.current === 'BULK_AUTO' && queuedBulkWaveRef.current?.length) {
+          flushQueuedBulkWaveRef.current();
         }
 
         // Master pending/dispatch locks are enforced inside dispatchNextAutoTrade.
@@ -1017,21 +1059,33 @@ export default function App() {
   };
 
   const handleExecuteBulkTrades = (trades: TradeInput[]) => {
+    if (!trades.length) return;
+
+    // Preserve the exact market/contract/target/stake wave selected by the
+    // original BulkMultiTrader until Deriv is actually ready to accept it.
+    queuedBulkWaveRef.current = trades.map((trade) => ({ ...trade }));
+
     const account = accountInfoRef.current;
-    if (!connected || !account.isAuthorized) {
+    if (!account.isAuthorized) {
       setIsConnectModalOpen(true);
-      showNotice('Connect Deriv before placing trades.');
+      showNotice('Connect Deriv before placing the queued bulk wave.');
       return;
     }
-    if (!derivService.isVirtualPracticeMode() && !derivService.isTradingReady()) {
+
+    if (!derivService.getConnectionState().connected) {
+      derivService.connect();
+      showNotice(`Bulk wave queued: ${trades.length} markets. Reconnecting Deriv market feed.`);
+      return;
+    }
+
+    if (!derivService.isTradingReady()) {
       const mode: AccountMode = account.isVirtual ? 'DEMO' : 'REAL';
-      showNotice(`${mode} Deriv trading connection is not ready yet. No orders were sent.`);
+      showNotice(`Bulk wave queued: ${trades.length} markets. Reconnecting ${mode} trading socket.`);
       void derivService.connectTradingAccount(mode);
       return;
     }
-    trades.forEach((trade, index) => {
-      setTimeout(() => handlePlaceTrade({ ...trade }), index * 75);
-    });
+
+    flushQueuedBulkWaveRef.current();
   };
 
   const handleDirectDerivLogin = async () => {
