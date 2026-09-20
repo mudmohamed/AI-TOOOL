@@ -748,7 +748,7 @@ class DerivWebSocketService {
     if (!clientId) {
       this.notifyHandlers({
         msg_type: 'auth_error',
-        error: 'SKIPPER Deriv OAuth login is not configured with a registered OAuth client ID.',
+        error: 'Deriv connection is not available on this deployment.',
       });
       return false;
     }
@@ -1040,7 +1040,7 @@ class DerivWebSocketService {
 
     this.notifyHandlers({
       msg_type: 'auth_error',
-      error: 'SKIPPER Deriv OAuth login is not configured with a registered OAuth client ID.',
+      error: 'Deriv connection is not available on this deployment.',
     });
   }
 
@@ -1149,8 +1149,6 @@ class DerivWebSocketService {
         balance: Number(balanceValue || 0),
       };
 
-      // Do not pass the OAuth access token into applyBridgeAccount; that method stores
-      // legacy/PAT tokens for reconnect. OAuth has its own isolated storage keys.
       const ok = await this.applyBridgeAccount(
         account,
         { demo: demoAccounts.length > 0, real: realAccounts.length > 0 },
@@ -1239,7 +1237,7 @@ class DerivWebSocketService {
     if (!cleanClientId) {
       this.notifyHandlers({
         msg_type: 'auth_error',
-        error: 'Enter the OAuth App ID from your Deriv developer application.',
+        error: 'Deriv connection is not available on this deployment.',
       });
       return;
     }
