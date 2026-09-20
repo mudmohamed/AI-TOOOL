@@ -1,4 +1,5 @@
 name: Restore Master DeepScan
+# exact ZIP master restore trigger
 
 on:
   push:
