@@ -1300,6 +1300,50 @@ class DerivWebSocketService {
     } catch {}
   }
 
+  // Compatibility surface for the exact original UI.
+// These methods delegate to the current working Deriv OAuth/account transport;
+// they do not alter strategy, stake, target, recovery, or settlement logic.
+  public authorize(token: string): Promise<boolean> {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken) return Promise.resolve(false);
+    if (this.accountInfo.isAuthorized && !this.accountInfo.isVirtual) {
+      return Promise.resolve(true);
+    }
+    return this.connectOAuthAccount(cleanToken, 'REAL');
+  }
+
+  public openOAuthLogin(_appId?: string): Window | null {
+    if (typeof window === 'undefined') return null;
+    void this.beginOAuthLogin(undefined, 'REAL');
+    return window;
+  }
+
+  public redirectToDerivOAuth(_appId?: string): Window | null {
+    if (typeof window === 'undefined') return null;
+    void this.beginOAuthLogin(undefined, 'REAL');
+    return window;
+  }
+
+  public async parseAndConnectSession(rawInput: string): Promise<boolean> {
+    const input = String(rawInput || '').trim();
+    if (!input) return false;
+
+    let token = input;
+    try {
+      if (input.startsWith('{') && input.endsWith('}')) {
+        const parsed = JSON.parse(input);
+        token = String(parsed.access_token || parsed.token || parsed.authorize || parsed.token1 || input);
+      } else if (input.includes('token=') || input.includes('token1=') || input.includes('access_token=')) {
+        const fragment = input.includes('#') ? input.split('#').pop()! : (input.includes('?') ? input.split('?').pop()! : input);
+        const params = new URLSearchParams(fragment);
+        token = params.get('access_token') || params.get('token') || params.get('token1') || token;
+      }
+    } catch {}
+
+    token = token.replace(/['"\s;]/g, '');
+    return this.authorize(token);
+  }
+
   public async beginOAuthLogin(clientId?: string, mode: AccountMode = 'REAL'): Promise<void> {
     if (typeof window === 'undefined') return;
     const cleanClientId = (clientId || this.getStoredOAuthClientId()).trim();
