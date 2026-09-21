@@ -109,7 +109,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
             <div>
               <h1 className="text-base sm:text-lg font-black tracking-tight text-white flex items-center gap-1.5">
-                SKIPPER AI TOOL
+                DERIV MATRIX
                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold border ${connected ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-rose-500/15 text-rose-300 border-rose-500/30'}`}>
                   {connected ? 'LIVE FEED' : 'OFFLINE'}
                 </span>
