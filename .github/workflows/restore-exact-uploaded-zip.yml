@@ -1,0 +1,116 @@
+name: Restore exact uploaded ZIP system
+
+on:
+  push:
+    branches: [exact-user-zip-system-20260921]
+    paths:
+      - '.github/workflows/restore-exact-uploaded-zip.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout isolated restore branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct and verify uploaded original system
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .restore/original-src.part* > /tmp/original-src.b64
+          base64 -d /tmp/original-src.b64 > /tmp/original-src.bin
+          rm -rf /tmp/original-extracted
+          mkdir -p /tmp/original-extracted
+          python - <<'PY'
+          import tarfile, zipfile, gzip, shutil, os
+          src='/tmp/original-src.bin'
+          out='/tmp/original-extracted'
+          ok=False
+          try:
+              with tarfile.open(src,'r:*') as t:
+                  t.extractall(out)
+                  ok=True
+          except Exception:
+              pass
+          if not ok:
+              try:
+                  with zipfile.ZipFile(src) as z:
+                      z.extractall(out)
+                      ok=True
+              except Exception:
+                  pass
+          if not ok:
+              raw='/tmp/original-src.raw'
+              try:
+                  with gzip.open(src,'rb') as g, open(raw,'wb') as w:
+                      shutil.copyfileobj(g,w)
+                  try:
+                      with tarfile.open(raw,'r:*') as t:
+                          t.extractall(out)
+                          ok=True
+                  except Exception:
+                      os.makedirs(os.path.join(out,'src'),exist_ok=True)
+                      shutil.copy2(raw,os.path.join(out,'src','App.tsx'))
+                      ok=True
+              except Exception:
+                  pass
+          if not ok:
+              raise SystemExit('Could not extract preserved uploaded ZIP payload')
+          PY
+
+          APP=$(find /tmp/original-extracted -type f -path '*/src/App.tsx' -print -quit)
+          test -n "$APP"
+          ROOT=${APP%/src/App.tsx}
+          echo "RESTORE_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+          cd "$ROOT"
+          echo 'a022f1d1c558d25c13d38fff9019a9f9d323dfa563f86bc2e290c09eaf751e22  src/App.tsx' | sha256sum -c -
+          echo '912b13f782043a0b92213da4547f088ed495a53a976eeee86657395eec7c5894  src/utils/autoMatchesEngine.ts' | sha256sum -c -
+          echo '715848847c2ec7b46d5a53f8eef6a39572ae367d74c4f1e15163e849c66a0367  src/utils/recoveryEngine.ts' | sha256sum -c -
+          echo 'cd5ee92b92709de98129a5681ea2255b99196b2d3561c31ed069df69ad77522c  src/utils/indicators.ts' | sha256sum -c -
+          echo '5d76db1bb67d6f23cdea2d5b248946a0d2639aff3bf97f14e9dc1e283aca39d2  src/types.ts' | sha256sum -c -
+          echo '47a5d3e76e8f59414b03b1fb142356bded0e86aeb1dcad590140cb89fdb4a53b  src/components/SuperRecoveryManager.tsx' | sha256sum -c -
+          echo '16628a4593b6b4e3ba7463d413b9e530ee3fcc73e1fa28e43a37d2d2f7b27372  src/components/BulkMultiTrader.tsx' | sha256sum -c -
+          echo '1eea2c588a00e93066ed7b834609bf39006cee9122653599ae53fd24a49c5c69  src/services/derivWs.ts' | sha256sum -c -
+
+      - name: Replace strategy with exact uploaded system and preserve connected Deriv transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp src/services/derivWs.ts /tmp/connected-derivWs.ts
+          rm -rf src
+          mkdir -p src
+          cp -a "$RESTORE_ROOT/src/." src/
+          cp /tmp/connected-derivWs.ts src/services/derivWs.ts
+
+      - name: Verify Deriv transport was not replaced
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp -s src/services/derivWs.ts /tmp/connected-derivWs.ts
+
+      - name: Build exact original strategy with existing Deriv connection
+        run: |
+          npm install --no-audit --no-fund
+          npm run lint
+          npm run build
+
+      - name: Commit verified exact original system
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Restore Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add src
+          if git diff --cached --quiet; then
+            echo "No source changes needed"
+            exit 0
+          fi
+          git commit -m "Restore exact uploaded original system; keep Deriv connection"
+          git push origin HEAD:exact-user-zip-system-20260921
