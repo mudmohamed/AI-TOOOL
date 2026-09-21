@@ -820,8 +820,59 @@ export default function App() {
           return;
         }
 
-        if (autoNextTradeRef.current) {
-          autoNextTradeRef.current = false;
+        // Original Super Recovery behavior: a loss keeps Auto-Next armed and
+        // immediately calculates the Same-Loss recovery stake using the same
+        // market, contract and target. A win resets the recovery counters via
+        // persistSettlement but does not silently disarm the bot.
+        if (!won && autoNextTradeRef.current && activeBotRef.current === 'SUPER_RECOVERY') {
+          const cfg = autoRecoveryConfigRef.current;
+          const nextConsecutiveLosses = nextStats.consecutiveLosses;
+          const nextCumulativeLoss = nextStats.cumulativeLoss;
+
+          if (nextCumulativeLoss >= cfg.stopLoss) {
+            setAutoRecoveryNotice(
+              `🛑 Circuit Breaker: Stop Loss (${cfg.stopLoss.toFixed(2)}) reached. Automatic Next Trade halted.`
+            );
+            setAutoNextTrade(false);
+            autoNextTradeRef.current = false;
+            setActiveBotSafe('NONE');
+            return;
+          }
+
+          if (nextConsecutiveLosses >= cfg.maxConsecutiveLosses) {
+            setAutoRecoveryNotice(
+              `🛑 Circuit Breaker: Max consecutive losses (${cfg.maxConsecutiveLosses}) reached. Automatic Next Trade halted.`
+            );
+            setAutoNextTrade(false);
+            autoNextTradeRef.current = false;
+            setActiveBotSafe('NONE');
+            return;
+          }
+
+          const nextStake = calculateNextStake(
+            cfg.baseStake,
+            nextCumulativeLoss,
+            nextConsecutiveLosses,
+            payoutMultiplier || pending.payout || cfg.payoutRate,
+            cfg.recoveryStrategy
+          );
+          const nextStep = nextConsecutiveLosses + 1;
+
+          setAutoRecoveryNotice(
+            `⚡ Auto Next Trade: Loss on ${pending.symbol}. Recovery Step #${nextStep} with ${nextStake.toFixed(2)} stake using the same market parameters.`
+          );
+
+          setTimeout(() => {
+            if (!autoNextTradeRef.current || activeBotRef.current !== 'SUPER_RECOVERY') return;
+            handlePlaceTradeRef.current({
+              contractType: pending.contractType,
+              targetValue: pending.targetValue,
+              stake: nextStake,
+              symbol: pending.symbol,
+            });
+          }, 100);
+        } else if (won && autoNextTradeRef.current && activeBotRef.current === 'SUPER_RECOVERY') {
+          setAutoRecoveryNotice('🎉 Super Recovery Success! Trade won — recovery drawdown reset.');
         }
         return;
       }
@@ -925,9 +976,41 @@ export default function App() {
 
   const handleToggleSuperRecoveryBot = (running: boolean) => {
     if (running && !requireAuthorizedBot('SUPER_RECOVERY')) return;
+
     setAutoNextTrade(running);
     autoNextTradeRef.current = running;
-    if (!running) setActiveBotSafe('NONE');
+
+    if (!running) {
+      setActiveBotSafe('NONE');
+      return;
+    }
+
+    setAutoRecoveryNotice(
+      '⚡ Automatic Next Trade Armed: Upon loss, recovery trade will auto-execute with the same market parameters.'
+    );
+
+    // Original master behavior: RUN starts the first trade immediately using
+    // the current Super Recovery configuration.
+    setTimeout(() => {
+      if (!autoNextTradeRef.current || activeBotRef.current !== 'SUPER_RECOVERY') return;
+
+      const cfg = autoRecoveryConfigRef.current;
+      const symbol = currentSymbolRef.current;
+      const live = marketTickDataRef.current[symbol];
+
+      if (!live || live.prices.length < 20 || live.digits.length < 20) {
+        derivService.requestTickHistory(symbol, 1000);
+        showNotice('Super Recovery armed — waiting for real Deriv history before first trade.');
+        return;
+      }
+
+      handlePlaceTradeRef.current({
+        symbol,
+        contractType: cfg.contractType || 'DIFFERS',
+        targetValue: 5,
+        stake: cfg.baseStake || 1.0,
+      });
+    }, 50);
   };
 
   const handleToggleBulkBot = (running: boolean) => {
@@ -1040,19 +1123,31 @@ export default function App() {
 
   const handleToggleAutoNextTrade = (enabled: boolean) => {
     const account = accountInfoRef.current;
-    if (enabled && (!connected || !account.isAuthorized)) {
+    if (enabled && !account.isAuthorized) {
       setIsConnectModalOpen(true);
       showNotice('Connect Deriv before starting automated trading.');
       return;
     }
-    if (enabled && !derivService.isVirtualPracticeMode() && !derivService.isTradingReady()) {
-      const mode: AccountMode = account.isVirtual ? 'DEMO' : 'REAL';
-      showNotice(`${mode} Deriv trading connection is not ready yet.`);
-      void derivService.connectTradingAccount(mode);
-      return;
-    }
+
     setAutoNextTrade(enabled);
     autoNextTradeRef.current = enabled;
+
+    if (enabled) {
+      setAutoRecoveryNotice(
+        '⚡ Automatic Next Trade Armed: Upon loss, recovery trade will auto-execute on the next recovery cycle.'
+      );
+
+      if (!derivService.getConnectionState().connected) {
+        derivService.connect();
+      }
+      if (!derivService.isTradingReady()) {
+        const mode: AccountMode = account.isVirtual ? 'DEMO' : 'REAL';
+        void derivService.connectTradingAccount(mode);
+      }
+    } else {
+      setAutoRecoveryNotice('Automatic Next Trade Paused (Manual execution mode active).');
+      setTimeout(() => setAutoRecoveryNotice(null), 3000);
+    }
   };
 
   const handleAuthSuccess = (profile: UserProfile) => {
@@ -1285,7 +1380,7 @@ export default function App() {
             autoRecoveryNotice={autoRecoveryNotice}
             onDismissNotice={() => setAutoRecoveryNotice(null)}
             onConfigChange={handleRecoveryConfigChange}
-            isRunning={activeBot === 'SUPER_RECOVERY'}
+            isRunning={activeBot === 'SUPER_RECOVERY' || autoNextTrade}
             onToggleRun={handleToggleSuperRecoveryBot}
           />
         )}
