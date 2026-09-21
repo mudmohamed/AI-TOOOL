@@ -16,7 +16,7 @@ import {
   UserProfile,
 } from './types';
 import { analyzeDigits, evaluateMarketStrength } from './utils/indicators';
-import { findBestAutoMatchesTarget, findBestDiffersTarget } from './utils/autoMatchesEngine';
+import { findBestAutoMatchesTarget } from './utils/autoMatchesEngine';
 import { calculateNextStake } from './utils/recoveryEngine';
 import { playLossSound, playOrderDispatchedSound, playWinSound } from './utils/soundEffects';
 import { Header } from './components/Header';
@@ -220,64 +220,77 @@ export default function App() {
   const vaultedProfitRef = useRef<number>(0);
 
   const [autoMatchesConfig, setAutoMatchesConfig] = useState<AutoMatchesConfig>(() => {
-    const masterDefaults: AutoMatchesConfig = {
+    try {
+      const videoVersion = localStorage.getItem('deriv_matrix_video_system_version');
+      const saved = localStorage.getItem('deriv_auto_matches_config');
+      if (videoVersion !== 'VIDEO_901971') {
+        const parsed = saved ? JSON.parse(saved) : {};
+        const restored = {
+          market: '1HZ10V',
+          stake: Number(parsed.stake) > 0 ? Number(parsed.stake) : 0.35,
+          winAmount: Number(parsed.winAmount) > 0 ? Number(parsed.winAmount) : (Number(parsed.stake) > 0 ? Number(parsed.stake) : 0.35),
+          expectedProfit: 10000,
+          maxAcceptableLoss: 10000,
+          nextTradeCondition: 'RESET_ON_WIN' as const,
+          martingaleFactor: 1,
+          restartOnError: true,
+          executionSpeed: 'FAST' as const,
+          targetStrategy: 'MARKOV_TRANSITION' as const,
+          stopConditionMode: 'ONLY_MANUAL_OR_TARGET' as const,
+          profitShieldActive: false,
+          profitLockEnabled: false,
+          profitLockTarget: 10000,
+          contractMode: 'DIFFERS' as const,
+        };
+        localStorage.setItem('deriv_auto_matches_config', JSON.stringify(restored));
+        localStorage.setItem('deriv_matrix_video_system_version', 'VIDEO_901971');
+        localStorage.removeItem('skipper_master_strategy_version');
+        return restored;
+      }
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          ...parsed,
+          expectedProfit: Math.max(10000, Number(parsed.expectedProfit) || 10000),
+          profitLockTarget: Math.max(10000, Number(parsed.profitLockTarget) || 10000),
+          profitLockEnabled: false,
+          profitShieldActive: false,
+          stopConditionMode: 'ONLY_MANUAL_OR_TARGET',
+          contractMode: parsed.contractMode || 'DIFFERS',
+        };
+      }
+    } catch {}
+    return {
       market: '1HZ10V',
       stake: 0.35,
       winAmount: 0.35,
-      expectedProfit: 20.0,
-      maxAcceptableLoss: 50.0,
-      nextTradeCondition: 'SAME_LOSS_RECOVERY',
-      martingaleFactor: 1.15,
+      expectedProfit: 10000,
+      maxAcceptableLoss: 10000,
+      nextTradeCondition: 'RESET_ON_WIN',
+      martingaleFactor: 1,
       restartOnError: true,
-      executionSpeed: 'TURBO',
+      executionSpeed: 'FAST',
       targetStrategy: 'MARKOV_TRANSITION',
-      contractMode: 'MATCHES',
-      onlyWhenSignalConfirmed: false,
       stopConditionMode: 'ONLY_MANUAL_OR_TARGET',
-      targetProfitPercentage: 100,
-      profitShieldActive: true,
-      profitShieldPercent: 100,
-      vaultedWonProfits: 0,
+      profitShieldActive: false,
+      profitLockEnabled: false,
+      profitLockTarget: 10000,
+      contractMode: 'DIFFERS',
     };
-
-    try {
-      const version = localStorage.getItem('skipper_master_strategy_version');
-      const saved = localStorage.getItem('deriv_auto_matches_config');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (version === 'ZIP_2026_09_15') return { ...masterDefaults, ...parsed };
-
-        const restored: AutoMatchesConfig = {
-          ...masterDefaults,
-          market: parsed.market || masterDefaults.market,
-          stake: Number(parsed.stake) > 0 ? Number(parsed.stake) : masterDefaults.stake,
-          winAmount: Number(parsed.winAmount) > 0 ? Number(parsed.winAmount) : masterDefaults.winAmount,
-          maxStakeCap: Number(parsed.maxStakeCap) > 0 ? Number(parsed.maxStakeCap) : undefined,
-          fixedStakeMode: Boolean(parsed.fixedStakeMode),
-          customTargetDigit: Number.isInteger(parsed.customTargetDigit) ? parsed.customTargetDigit : undefined,
-        };
-        localStorage.setItem('deriv_auto_matches_config', JSON.stringify(restored));
-        localStorage.setItem('skipper_master_strategy_version', 'ZIP_2026_09_15');
-        return restored;
-      }
-      localStorage.setItem('skipper_master_strategy_version', 'ZIP_2026_09_15');
-    } catch {}
-
-    return masterDefaults;
   });
   const autoMatchesConfigRef = useRef(autoMatchesConfig);
   autoMatchesConfigRef.current = autoMatchesConfig;
 
   const autoRecoveryConfigRef = useRef<RiskConfig>({
-    baseStake: 1.0,
+    baseStake: 1,
     payoutRate: 1.95,
     recoveryStrategy: 'X2_SUPER_RECOVERY',
-    takeProfit: 50.0,
-    stopLoss: 100.0,
+    takeProfit: 10000,
+    stopLoss: 10000,
     maxConsecutiveLosses: 6,
     contractType: 'DIFFERS',
-    profitLockEnabled: true,
-    profitLockTarget: 50.0,
+    profitLockEnabled: false,
+    profitLockTarget: 10000,
   });;
 
   const [activeTab, setActiveTab] = useState<'SYSTEM' | 'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('SYSTEM');
@@ -405,213 +418,6 @@ export default function App() {
   flushQueuedBulkWaveRef.current = flushQueuedBulkWave;
 
 
-  // Master ZIP zero-latency event-driven Auto-Matches dispatcher.
-  const dispatchNextAutoTradeRef = useRef<((entryP?: number, entryD?: number) => void) | null>(null);
-
-  const dispatchNextAutoTrade = (entryP?: number, entryD?: number) => {
-    if (!autoMatchesActiveRef.current) return;
-    if (autoDispatchLockRef.current) return;
-
-    const currentSym = currentSymbolRef.current;
-    const hasPending = pendingTradesRef.current.some(
-      (trade) => trade.status === 'PENDING' && trade.symbol === currentSym
-    );
-    if (hasPending) return;
-
-    const liveSample = marketTickDataRef.current[currentSym];
-    if (!liveSample || liveSample.digits.length < 20 || liveSample.prices.length < 20) {
-      if (!historyPendingRef.current.has(currentSym)) {
-        historyPendingRef.current.add(currentSym);
-        derivService.requestTickHistory(currentSym, 1000);
-      }
-      return;
-    }
-
-    const account = accountInfoRef.current;
-    if (!account.isAuthorized || derivService.isVirtualPracticeMode()) {
-      showNotice('Connect a Deriv DEMO or REAL account before starting the master engine.');
-      return;
-    }
-    if (!derivService.isTradingReady()) {
-      void derivService.connectTradingAccount(account.isVirtual ? 'DEMO' : 'REAL');
-      return;
-    }
-
-    autoDispatchLockRef.current = true;
-    lastDispatchTimeRef.current = Date.now();
-
-    const cfg = autoMatchesConfigRef.current;
-    const stats = sessionStatsRef.current;
-    const expectedProfitTarget = cfg.expectedProfit ?? 20.0;
-    const maxLossLimit = cfg.maxAcceptableLoss ?? 50.0;
-    const stopCondition = cfg.stopConditionMode || 'ONLY_MANUAL_OR_TARGET';
-
-    const peakP = peakProfitRef.current;
-    const isShieldOn = cfg.profitShieldActive ?? true;
-    if (isShieldOn && peakP >= 1.50) {
-      const allowedReversalPct = 100 - (cfg.profitShieldPercent ?? 100);
-      const allowedDrop = (peakP * allowedReversalPct) / 100;
-      const floor = Math.max(0, peakP - Math.max(0.50, allowedDrop));
-      if (stats.netProfit <= floor) {
-        autoDispatchLockRef.current = false;
-        setAutoMatchesActive(false);
-        autoMatchesActiveRef.current = false;
-        setActiveBotSafe('NONE');
-        showNotice(
-          `100% Won Profit Vault Shield: secured +$${stats.netProfit.toFixed(2)} and stopped the engine.`
-        );
-        return;
-      }
-    }
-
-    if (
-      stopCondition === 'ONLY_MANUAL_OR_TARGET' &&
-      expectedProfitTarget > 0 &&
-      stats.netProfit >= expectedProfitTarget
-    ) {
-      autoDispatchLockRef.current = false;
-      setAutoMatchesActive(false);
-      autoMatchesActiveRef.current = false;
-      setActiveBotSafe('NONE');
-      showNotice(
-        `Target reached: +$${stats.netProfit.toFixed(2)} (target $${expectedProfitTarget.toFixed(2)}).`
-      );
-      return;
-    }
-
-    if (stopCondition === 'STOP_ON_MAX_LOSS' && stats.cumulativeLoss >= maxLossLimit) {
-      autoDispatchLockRef.current = false;
-      setAutoMatchesActive(false);
-      autoMatchesActiveRef.current = false;
-      setActiveBotSafe('NONE');
-      showNotice(
-        `Max acceptable loss $${maxLossLimit.toFixed(2)} reached. Auto-Matches stopped.`
-      );
-      return;
-    }
-
-    let contractType: 'MATCHES' | 'DIFFERS' | 'OVER' | 'UNDER' =
-      cfg.contractMode === 'DIFFERS' || cfg.targetStrategy === 'COLD_DIFFERS'
-        ? 'DIFFERS'
-        : cfg.contractMode === 'OVER_UNDER'
-        ? 'UNDER'
-        : 'MATCHES';
-
-    const fallbackPrice = derivService.getCurrentPrice(currentSym) || currentPrice || 0;
-    const curPrice = entryP !== undefined ? entryP : fallbackPrice;
-    const curDigit =
-      entryD !== undefined
-        ? entryD
-        : derivService.extractLastDigit(curPrice, currentSym);
-
-    const symTicks = marketTickDataRef.current[currentSym];
-    const updatedDigits = symTicks?.digits?.length ? symTicks.digits : digits;
-
-    let targetDigit = curDigit;
-    let payoutRate = 8.342857;
-
-    if (contractType === 'DIFFERS') {
-      const cold = findBestDiffersTarget(updatedDigits, curDigit);
-      targetDigit = cfg.customTargetDigit !== undefined ? cfg.customTargetDigit : cold.targetDigit;
-      payoutRate = 1.095;
-    } else if (contractType === 'UNDER') {
-      targetDigit = 7;
-      payoutRate = 1.40;
-    } else {
-      payoutRate = 8.342857;
-      if (cfg.customTargetDigit !== undefined) {
-        targetDigit = cfg.customTargetDigit;
-      } else if (cfg.targetStrategy === 'REPEAT_ENTRY') {
-        targetDigit = curDigit;
-      } else if (cfg.targetStrategy === 'HOTTEST_CLUSTER') {
-        const analysis = marketAnalysesRef.current[currentSym];
-        targetDigit = analysis?.hotDigit !== undefined ? analysis.hotDigit : curDigit;
-      } else {
-        const analysis = marketAnalysesRef.current[currentSym];
-        const autoSignal = findBestAutoMatchesTarget(
-          currentSym,
-          analysis?.displayName || currentSym,
-          updatedDigits,
-          analysis?.digitStats || [],
-          curDigit
-        );
-
-        if (cfg.onlyWhenSignalConfirmed && !autoSignal.isTriggerReady) {
-          autoDispatchLockRef.current = false;
-          return;
-        }
-        targetDigit = autoSignal.targetDigit;
-      }
-    }
-
-    const maxAllowedLosses = cfg.maxAllowedLosses || 3;
-    if (stats.consecutiveLosses >= maxAllowedLosses) {
-      autoDispatchLockRef.current = false;
-      setAutoMatchesActive(false);
-      autoMatchesActiveRef.current = false;
-      setActiveBotSafe('NONE');
-      showNotice(
-        `Account Preservation Guard: ${maxAllowedLosses} consecutive losses reached.`
-      );
-      return;
-    }
-
-    let tradeStake = cfg.stake || 0.35;
-    if (cfg.fixedStakeMode || cfg.nextTradeCondition === 'FIXED_STAKE') {
-      tradeStake = cfg.stake || 0.35;
-    } else if (stats.consecutiveLosses > 0) {
-      if (cfg.nextTradeCondition === 'SAME_LOSS_RECOVERY') {
-        const targetWinProfit = cfg.winAmount || cfg.stake || 0.35;
-        const netPayout = payoutRate > 1.5 ? payoutRate - 1 : payoutRate;
-        tradeStake = Number(
-          Math.min(
-            maxLossLimit,
-            Math.max(cfg.stake || 0.35, (stats.cumulativeLoss + targetWinProfit) / netPayout)
-          ).toFixed(2)
-        );
-      } else if (cfg.nextTradeCondition === 'RESET_ON_WIN') {
-        tradeStake = cfg.stake || 0.35;
-      } else {
-        const factor = cfg.martingaleFactor || 1.15;
-        tradeStake = Number(
-          Math.min(
-            maxLossLimit,
-            (cfg.stake || 0.35) * Math.pow(factor, stats.consecutiveLosses)
-          ).toFixed(2)
-        );
-      }
-    } else {
-      tradeStake = cfg.winAmount || cfg.stake || 0.35;
-    }
-
-    const maxCap =
-      cfg.maxStakeCap && cfg.maxStakeCap > 0
-        ? cfg.maxStakeCap
-        : (cfg.stake || 0.35) * 3;
-    tradeStake = Math.min(maxCap, Math.min(maxLossLimit, tradeStake));
-
-    const paceDelay =
-      cfg.executionSpeed === 'TURBO' ? 0 : cfg.executionSpeed === 'FAST' ? 30 : 200;
-
-    const execute = () => {
-      autoDispatchLockRef.current = false;
-      if (!autoMatchesActiveRef.current) return;
-      handlePlaceTradeRef.current({
-        contractType,
-        targetValue: targetDigit,
-        stake: tradeStake,
-        symbol: currentSym,
-        entryPrice: curPrice,
-        entryDigit: curDigit,
-        payout: payoutRate,
-      });
-    };
-
-    if (paceDelay === 0) execute();
-    else setTimeout(execute, paceDelay);
-  };
-  dispatchNextAutoTradeRef.current = dispatchNextAutoTrade;
-
   const persistSettlement = useCallback((trade: TradeRecord) => {
     const history = [trade, ...tradeHistoryRef.current.filter((item) => item.id !== trade.id)].slice(0, 1000);
     tradeHistoryRef.current = history;
@@ -682,9 +488,6 @@ export default function App() {
               ? derivService.extractLastDigit(livePrice, symbol)
               : (cachedDigits.length ? cachedDigits[cachedDigits.length - 1] : 0);
 
-          if (autoMatchesActiveRef.current) {
-            dispatchNextAutoTradeRef.current?.(livePrice, liveDigit);
-          }
           if (activeBotRef.current === 'BULK_AUTO' && queuedBulkWaveRef.current?.length) {
             flushQueuedBulkWaveRef.current();
           }
@@ -726,8 +529,8 @@ export default function App() {
         if (!symbol || !Number.isFinite(quote)) return;
         const tickDigit = derivService.extractLastDigit(quote, symbol);
         const previous = marketTickDataRef.current[symbol] || { prices: [], digits: [] };
-        const updatedPrices = [...previous.prices, quote].slice(-1000);
-        const updatedDigits = [...previous.digits, tickDigit].slice(-1000);
+        const updatedPrices = [...previous.prices, quote].slice(-2000);
+        const updatedDigits = [...previous.digits, tickDigit].slice(-2000);
         marketTickDataRef.current[symbol] = { prices: updatedPrices, digits: updatedDigits };
         setTotalTicksReceived((count) => count + 1);
 
@@ -767,9 +570,107 @@ export default function App() {
           flushQueuedBulkWaveRef.current();
         }
 
-        // Master pending/dispatch locks are enforced inside dispatchNextAutoTrade.
+        // Video-era controller: one in-flight Auto trade at a time, with the
+        // original 3.5s stale-request release and 2.5s dispatch lock release.
+        const now = Date.now();
+        const activePending = pendingTradesRef.current.filter(
+          (trade) => trade.status === 'PENDING' && (now - trade.timestamp) < 3500
+        );
+        if (activePending.length !== pendingTradesRef.current.length) {
+          syncPendingTrades(() => activePending);
+        }
+        if (activePending.length > 0 && autoMatchesActiveRef.current) return;
+
+        if (autoDispatchLockRef.current && autoMatchesActiveRef.current) {
+          if (now - lastDispatchTimeRef.current > 2500) {
+            autoDispatchLockRef.current = false;
+          } else {
+            return;
+          }
+        }
+
         if (autoMatchesActiveRef.current && symbol === currentSymbolRef.current) {
-          dispatchNextAutoTradeRef.current?.(quote, tickDigit);
+          const cfg = autoMatchesConfigRef.current;
+          const currentStats = sessionStatsRef.current;
+
+          // 1. Profit Target (Take Profit $10,000 target)
+          const targetProfit = cfg.expectedProfit ?? 10000;
+          if (currentStats.netProfit >= targetProfit) {
+            handleStopAllBots();
+            vaultedProfitRef.current = Math.max(vaultedProfitRef.current, currentStats.netProfit);
+            showNotice(`Take Profit Target 100% (+$${currentStats.netProfit.toFixed(2)}) reached! All profits secured.`);
+            return;
+          }
+
+          // 2. Profit Lock Check (ONLY if explicitly configured and NOT in continuous mode)
+          if (cfg.profitLockEnabled && cfg.stopConditionMode !== 'ONLY_MANUAL_OR_TARGET' && currentStats.netProfit >= (cfg.profitLockTarget ?? 10000)) {
+            handleStopAllBots();
+            vaultedProfitRef.current = Math.max(vaultedProfitRef.current, currentStats.netProfit);
+            showNotice(`Daily Profit Lock target (+$${currentStats.netProfit.toFixed(2)}) reached!`);
+            return;
+          }
+
+          // 3. Vault Shield (ONLY if explicitly enabled and NOT in continuous mode)
+          if (cfg.profitShieldActive && cfg.stopConditionMode !== 'ONLY_MANUAL_OR_TARGET' && vaultedProfitRef.current > 0) {
+            const drawdownBuffer = Math.max(5, (cfg.maxAcceptableLoss ?? 10000) * 0.4);
+            if (currentStats.netProfit < (vaultedProfitRef.current - drawdownBuffer)) {
+              handleStopAllBots();
+              showNotice(`Won Profit Shield: Trading halted at $${vaultedProfitRef.current.toFixed(2)}.`);
+              return;
+            }
+          }
+
+          // 4. Stop on Max Loss Limit: ONLY if user explicitly configured STOP_ON_MAX_LOSS
+          if (cfg.stopConditionMode === 'STOP_ON_MAX_LOSS') {
+            if (currentStats.cumulativeLoss >= (cfg.maxAcceptableLoss ?? 10000)) {
+              handleStopAllBots();
+              showNotice('Configured loss limit reached. Auto-Matches stopped.');
+              return;
+            }
+          }
+
+          const currentAnalysis = marketAnalysesRef.current[symbol];
+          if (!currentAnalysis) return;
+          const signal = findBestAutoMatchesTarget(
+            symbol,
+            currentAnalysis.displayName,
+            updatedDigits,
+            currentAnalysis.digitStats,
+            tickDigit,
+          );
+
+          const isMatchesMode = cfg.contractMode === 'MATCHES';
+          const contractType = isMatchesMode ? 'MATCHES' : 'DIFFERS';
+          let targetDigit = tickDigit;
+
+          if (!isMatchesMode) {
+            targetDigit = currentAnalysis.coldDigit ?? 5;
+          } else {
+            if (cfg.customTargetDigit !== undefined) targetDigit = cfg.customTargetDigit;
+            else if (cfg.targetStrategy === 'MARKOV_TRANSITION') {
+              targetDigit = signal.targetDigit;
+            } else if (cfg.targetStrategy === 'HOTTEST_CLUSTER') targetDigit = currentAnalysis.hotDigit;
+            else if (cfg.targetStrategy === 'REPEAT_ENTRY') targetDigit = tickDigit;
+          }
+
+          const recoveryState = derivService.getRecoveryState(symbol);
+          const calculatedStake = calculateNextStake(
+            cfg.stake || 1,
+            currentStats.cumulativeLoss,
+            currentStats.consecutiveLosses,
+            isMatchesMode ? 9.5 : 1.095,
+            isMatchesMode ? 'X2_SUPER_RECOVERY' : 'MARTINGALE'
+          );
+
+          autoDispatchLockRef.current = true;
+          lastDispatchTimeRef.current = Date.now();
+
+          handlePlaceTradeRef.current({
+            symbol,
+            contractType,
+            targetValue: targetDigit,
+            stake: calculatedStake,
+          });
           return;
         }
 
@@ -929,32 +830,6 @@ export default function App() {
     return unsubscribe;
   }, [handleStopAllBots, persistSettlement, showNotice]);
 
-  // Untouched master fail-safe: purge genuinely stuck orders after 6 seconds,
-  // then resume the event-driven stream from the latest real tick.
-  useEffect(() => {
-    const watchdogInterval = setInterval(() => {
-      if (!autoMatchesActiveRef.current) return;
-      const now = Date.now();
-      const current = pendingTradesRef.current;
-      const stuck = current.filter(
-        (trade) => trade.status === 'PENDING' && now - trade.timestamp > 6000
-      );
-      if (stuck.length > 0) {
-        const remaining = current.filter(
-          (trade) => !(trade.status === 'PENDING' && now - trade.timestamp > 6000)
-        );
-        syncPendingTrades(() => remaining);
-        autoDispatchLockRef.current = false;
-        const symbol = currentSymbolRef.current;
-        const price = derivService.getCurrentPrice(symbol);
-        const digit =
-          price !== undefined ? derivService.extractLastDigit(price, symbol) : lastDigit;
-        dispatchNextAutoTradeRef.current?.(price, digit);
-      }
-    }, 1500);
-
-    return () => clearInterval(watchdogInterval);
-  }, [lastDigit]);
 
   const handleSelectSymbol = (newSymbol: string) => {
     if (newSymbol === currentSymbolRef.current) return;
@@ -1035,10 +910,9 @@ export default function App() {
     }
     setAutoMatchesActive(running);
     autoMatchesActiveRef.current = running;
+    autoDispatchLockRef.current = false;
     if (running) {
-      autoDispatchLockRef.current = false;
-      showNotice('Auto-Matches armed. First trade will send on the live Deriv stream.');
-      dispatchNextAutoTradeRef.current?.(currentPrice, lastDigit);
+      showNotice('DERIV MATRIX Auto Trading Bot active — waiting for the next real Deriv tick.');
     } else {
       setActiveBotSafe('NONE');
     }
