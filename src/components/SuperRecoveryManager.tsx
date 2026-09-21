@@ -770,11 +770,24 @@ export const SuperRecoveryManager: React.FC<SuperRecoveryManagerProps> = ({
                   onClick={() => {
                     const next = !isRunning;
                     onToggleRun(next);
-                    if (next && !isAutoArmed) {
-                      if (onToggleAutoNextTrade) {
-                        onToggleAutoNextTrade(true);
-                      } else {
-                        setLocalAutoNextTrade(true);
+                    if (next) {
+                      if (!isAutoArmed) {
+                        if (onToggleAutoNextTrade) {
+                          onToggleAutoNextTrade(true);
+                        } else {
+                          setLocalAutoNextTrade(true);
+                        }
+                      }
+
+                      // Original RUN behavior: start the first trade with the
+                      // user's selected contract, target and calculated stake.
+                      if (!isTradeBlocked) {
+                        const target = config.contractType === 'RISE'
+                          ? 'Higher'
+                          : config.contractType === 'FALL'
+                            ? 'Lower'
+                            : selectedTargetDigit;
+                        handleExecuteTrade(config.contractType, target);
                       }
                     }
                   }}
