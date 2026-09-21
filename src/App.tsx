@@ -211,6 +211,10 @@ export default function App() {
   const autoMatchesActiveRef = useRef(false);
   const [autoNextTrade, setAutoNextTrade] = useState(false);
   const autoNextTradeRef = useRef(false);
+  // Original Super Recovery: only a settled loss arms the same-parameter
+  // recovery order for the next incoming tick.
+  const recoveryPendingRef = useRef(false);
+  const recoveryTradeRef = useRef<TradeInput | null>(null);
   const [autoRecoveryNotice, setAutoRecoveryNotice] = useState<string | null>(null);
   const [isSafetyModalOpen, setIsSafetyModalOpen] = useState(false);
   const [recoveryMode, setRecoveryMode] = useState<'X2_SUPER_RECOVERY' | 'X4_SUPER_RECOVERY'>('X2_SUPER_RECOVERY');
@@ -306,6 +310,8 @@ export default function App() {
     autoMatchesActiveRef.current = false;
     setAutoNextTrade(false);
     autoNextTradeRef.current = false;
+    recoveryPendingRef.current = false;
+    recoveryTradeRef.current = null;
     autoDispatchLockRef.current = false;
     queuedBulkWaveRef.current = null;
     showNotice('Automated trading stopped. Existing Deriv contracts continue to settlement.', 3000);
@@ -697,26 +703,20 @@ export default function App() {
           return;
         }
 
-        if (activeBotRef.current === 'SUPER_RECOVERY' && autoNextTradeRef.current) {
-          const currentAnalysis = marketAnalysesRef.current[symbol];
+        if (activeBotRef.current === 'SUPER_RECOVERY' && autoNextTradeRef.current && recoveryPendingRef.current) {
+          const recoveryTrade = recoveryTradeRef.current;
+          if (!recoveryTrade || recoveryTrade.symbol !== symbol) return;
+
           autoDispatchLockRef.current = true;
-          autoNextTradeRef.current = false;
+          recoveryPendingRef.current = false;
           lastDispatchTimeRef.current = Date.now();
 
-          const calculatedStake = calculateNextStake(
-            1,
-            sessionStatsRef.current.cumulativeLoss,
-            sessionStatsRef.current.consecutiveLosses,
-            currentAnalysis?.recommendedContract === 'MATCHES' ? 9.5 : 1.095,
-            recoveryMode
-          );
-
-          handlePlaceTradeRef.current({
-            symbol,
-            contractType: currentAnalysis?.recommendedContract || 'DIFFERS',
-            targetValue: currentAnalysis?.recommendedTarget ?? 5,
-            stake: calculatedStake,
-          });
+          const sent = handlePlaceTradeRef.current({ ...recoveryTrade });
+          if (!sent) {
+            // Keep the exact recovery order armed if Deriv is temporarily reconnecting.
+            recoveryPendingRef.current = true;
+            autoDispatchLockRef.current = false;
+          }
           return;
         }
         return;
@@ -820,10 +820,10 @@ export default function App() {
           return;
         }
 
-        // Original Super Recovery behavior: a loss keeps Auto-Next armed and
-        // immediately calculates the Same-Loss recovery stake using the same
-        // market, contract and target. A win resets the recovery counters via
-        // persistSettlement but does not silently disarm the bot.
+        // Original Super Recovery behavior: keep Auto-Next armed. After a
+        // real loss, calculate the recovery stake but preserve the exact
+        // losing market, contract and target. The next incoming tick on that
+        // same market sends the recovery order. A win resets the chain.
         if (!won && autoNextTradeRef.current && activeBotRef.current === 'SUPER_RECOVERY') {
           const cfg = autoRecoveryConfigRef.current;
           const nextConsecutiveLosses = nextStats.consecutiveLosses;
@@ -835,6 +835,8 @@ export default function App() {
             );
             setAutoNextTrade(false);
             autoNextTradeRef.current = false;
+            recoveryPendingRef.current = false;
+            recoveryTradeRef.current = null;
             setActiveBotSafe('NONE');
             return;
           }
@@ -845,6 +847,8 @@ export default function App() {
             );
             setAutoNextTrade(false);
             autoNextTradeRef.current = false;
+            recoveryPendingRef.current = false;
+            recoveryTradeRef.current = null;
             setActiveBotSafe('NONE');
             return;
           }
@@ -858,20 +862,20 @@ export default function App() {
           );
           const nextStep = nextConsecutiveLosses + 1;
 
+          recoveryTradeRef.current = {
+            contractType: pending.contractType,
+            targetValue: pending.targetValue,
+            stake: nextStake,
+            symbol: pending.symbol,
+          };
+          recoveryPendingRef.current = true;
+
           setAutoRecoveryNotice(
             `⚡ Auto Next Trade: Loss on ${pending.symbol}. Recovery Step #${nextStep} with ${nextStake.toFixed(2)} stake using the same market parameters.`
           );
-
-          setTimeout(() => {
-            if (!autoNextTradeRef.current || activeBotRef.current !== 'SUPER_RECOVERY') return;
-            handlePlaceTradeRef.current({
-              contractType: pending.contractType,
-              targetValue: pending.targetValue,
-              stake: nextStake,
-              symbol: pending.symbol,
-            });
-          }, 100);
         } else if (won && autoNextTradeRef.current && activeBotRef.current === 'SUPER_RECOVERY') {
+          recoveryPendingRef.current = false;
+          recoveryTradeRef.current = null;
           setAutoRecoveryNotice('🎉 Super Recovery Success! Trade won — recovery drawdown reset.');
         }
         return;
@@ -981,6 +985,8 @@ export default function App() {
     autoNextTradeRef.current = running;
 
     if (!running) {
+      recoveryPendingRef.current = false;
+      recoveryTradeRef.current = null;
       setActiveBotSafe('NONE');
       return;
     }
@@ -988,29 +994,6 @@ export default function App() {
     setAutoRecoveryNotice(
       '⚡ Automatic Next Trade Armed: Upon loss, recovery trade will auto-execute with the same market parameters.'
     );
-
-    // Original master behavior: RUN starts the first trade immediately using
-    // the current Super Recovery configuration.
-    setTimeout(() => {
-      if (!autoNextTradeRef.current || activeBotRef.current !== 'SUPER_RECOVERY') return;
-
-      const cfg = autoRecoveryConfigRef.current;
-      const symbol = currentSymbolRef.current;
-      const live = marketTickDataRef.current[symbol];
-
-      if (!live || live.prices.length < 20 || live.digits.length < 20) {
-        derivService.requestTickHistory(symbol, 1000);
-        showNotice('Super Recovery armed — waiting for real Deriv history before first trade.');
-        return;
-      }
-
-      handlePlaceTradeRef.current({
-        symbol,
-        contractType: cfg.contractType || 'DIFFERS',
-        targetValue: 5,
-        stake: cfg.baseStake || 1.0,
-      });
-    }, 50);
   };
 
   const handleToggleBulkBot = (running: boolean) => {
@@ -1145,6 +1128,8 @@ export default function App() {
         void derivService.connectTradingAccount(mode);
       }
     } else {
+      recoveryPendingRef.current = false;
+      recoveryTradeRef.current = null;
       setAutoRecoveryNotice('Automatic Next Trade Paused (Manual execution mode active).');
       setTimeout(() => setAutoRecoveryNotice(null), 3000);
     }
