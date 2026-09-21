@@ -78,22 +78,29 @@ jobs:
           cp /tmp/live-derivWs.ts src/services/derivWs.ts
           cmp -s src/services/derivWs.ts /tmp/live-derivWs.ts
 
+      - name: Commit exact original system to verification branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Restore Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout -B exact-original-master
+          git add src
+          git commit -m "Restore exact uploaded original system; preserve Deriv connection" || true
+          git push --force origin HEAD:exact-original-master
+
       - name: Build verified original system
         run: |
           npm install --no-audit --no-fund
           npm run lint
           npm run build
 
-      - name: Commit verified original strategy
+      - name: Mark exact original build verified
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "Restore Bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add src
-          if git diff --cached --quiet; then
-            echo "No strategy changes required"
-            exit 0
-          fi
-          git commit -m "Restore exact uploaded original system; preserve Deriv connection"
-          git push origin HEAD:main
+          mkdir -p .restore
+          printf '%s\n' "ZIP strategy hashes verified; preserved Deriv transport; lint/build passed." > .restore/EXACT_ORIGINAL_BUILD_OK.txt
+          git add .restore/EXACT_ORIGINAL_BUILD_OK.txt
+          git commit -m "Verify exact uploaded original system build"
+          git push origin HEAD:exact-original-master
