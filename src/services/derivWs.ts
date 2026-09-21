@@ -1387,46 +1387,44 @@ class DerivWebSocketService {
   }
 
 
-  public startVirtualPracticeSession(initialBalance = 10000): void {
-    this.isPracticeSession = true;
-    let balance = initialBalance;
+  public startVirtualPracticeSession(_initialBalance = 10000): void {
+    // Local simulated practice is disabled. DEMO must be a genuine Deriv demo/VRTC account.
+    this.isPracticeSession = false;
     try {
-      const saved = Number(localStorage.getItem('deriv_virtual_balance'));
-      if (Number.isFinite(saved) && saved > 0) balance = saved;
-      localStorage.setItem('deriv_virtual_practice', 'true');
-      localStorage.setItem('deriv_virtual_balance', String(balance));
+      localStorage.removeItem('deriv_virtual_practice');
+      localStorage.removeItem('deriv_virtual_balance');
+
+      const oauthToken = localStorage.getItem('deriv_oauth_access_token_real') || '';
+      const oauthExpiry = Number(localStorage.getItem('deriv_oauth_expires_at') || 0);
+      if (oauthToken && oauthExpiry > Date.now() + 15000) {
+        void this.connectOAuthAccount(oauthToken, 'DEMO');
+        return;
+      }
     } catch {}
 
-    this.accountInfo = {
-      isAuthorized: true,
-      appId: 'virtual_practice',
-      loginId: 'VRTC-PRACTICE',
-      currency: 'USD',
-      balance,
-      isVirtual: true,
-      accountsList: [
-        { loginid: 'VRTC-PRACTICE', currency: 'USD', is_virtual: true },
-        { loginid: 'CR-REAL', currency: 'USD', is_virtual: false },
-      ],
-    };
+    const clientId = this.getStoredOAuthClientId();
+    if (clientId) {
+      void this.beginOAuthLogin(clientId, 'DEMO');
+      return;
+    }
 
-    this.resetAllMatchesRecovery();
-    this.notifyHandlers({ msg_type: 'account_connection_status', connected: true });
-    this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+    this.accountInfo = { isAuthorized: false, appId: 'oauth2' };
+    this.notifyHandlers({
+      msg_type: 'auth_error',
+      error: 'Local practice mode is disabled. Connect your genuine Deriv Demo account.',
+    });
   }
 
-  public refillVirtualPracticeBalance(amount = 10000): void {
-    if (!this.isPracticeSession) return;
-    this.accountInfo = { ...this.accountInfo, balance: amount };
-    try {
-      localStorage.setItem('deriv_virtual_balance', String(amount));
-    } catch {}
-    this.resetAllMatchesRecovery();
-    this.notifyHandlers({ msg_type: 'account_update', account: this.accountInfo });
+  public refillVirtualPracticeBalance(_amount = 10000): void {
+    this.isPracticeSession = false;
+    this.notifyHandlers({
+      msg_type: 'auth_error',
+      error: 'Local practice balance is disabled. Deriv controls the genuine Demo account balance.',
+    });
   }
 
   public isVirtualPracticeMode(): boolean {
-    return this.isPracticeSession;
+    return false;
   }
 
   private placeVirtualPracticeContract(params: PlaceContractParams): boolean {
@@ -1651,7 +1649,14 @@ class DerivWebSocketService {
 
   public placeContract(params: PlaceContractParams): boolean {
     if (this.isPracticeSession) {
-      return this.placeVirtualPracticeContract(params);
+      this.isPracticeSession = false;
+      this.notifyHandlers({
+        msg_type: 'trade_error',
+        clientTradeId: params.clientTradeId,
+        stage: 'preflight',
+        error: 'Local practice execution is disabled. Connect a genuine Deriv Demo or Real account.',
+      });
+      return false;
     }
 
     if (!this.accountInfo.isAuthorized) {
