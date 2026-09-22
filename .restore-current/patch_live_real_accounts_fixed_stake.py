@@ -260,8 +260,10 @@ for i, (old, new) in enumerate(replacements, 1):
 
 if 'startVirtualPracticeSession(10000)' in s:
     raise SystemExit('local practice fallback still present in App.tsx')
-if 'stake: calculatedStake' in s and 'autoMatchesActiveRef.current' in s:
-    raise SystemExit('Auto Matches calculated recovery stake still present')
+if """          const recoveryState = derivService.getRecoveryState(symbol);
+          const calculatedStake = calculateNextStake(
+            cfg.stake || 1,""" in s:
+    raise SystemExit('Auto Matches cumulative-loss recovery block still present')
 if 'const selectedStake = Math.max(0.35, Number(cfg.stake) || 0.35);' not in s:
     raise SystemExit('fixed Auto Matches stake guard missing')
 
