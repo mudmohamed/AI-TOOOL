@@ -954,8 +954,7 @@ class DerivWebSocketService {
 
   private updateManagedMatchesFromSettlement(contract: any): void {
     const contractId = String(contract?.contract_id ?? '');
-    const meta = this.openContracts.get(contractId);
-    if (!meta) return;
+    if (!contractId) return;
 
     const status = String(contract?.status || '').toLowerCase();
     const settled = Boolean(
@@ -963,47 +962,9 @@ class DerivWebSocketService {
       contract?.is_expired ||
       ['won', 'lost', 'sold', 'expired'].includes(status)
     );
-    if (!settled) return;
 
-    this.openContracts.delete(contractId);
-    if (!meta.managedMatches) return;
-
-    const state = this.getRecoveryState(meta.symbol);
-    const profit = Number(contract?.profit ?? 0);
-    const won = status === 'won' || profit > 0;
-
-    if (won) {
-      state.recoveryStep = 0;
-      state.halted = false;
-      state.baseStake = 0;
-      this.notifyHandlers({
-        msg_type: 'matches_recovery_update',
-        symbol: meta.symbol,
-        won: true,
-        recoveryStep: 0,
-        halted: false,
-        profit,
-      });
-      return;
-    }
-
-    state.recoveryStep += 1;
-    if (state.recoveryStep >= state.maxSteps) {
-      state.recoveryStep = 0;
-      state.baseStake = 0;
-      state.halted = false;
-    }
-
-    this.notifyHandlers({
-      msg_type: 'matches_recovery_update',
-      symbol: meta.symbol,
-      won: false,
-      recoveryStep: state.recoveryStep,
-      halted: false,
-      profit,
-    });
+    if (settled) this.openContracts.delete(contractId);
   }
-
 
   public switchAccount(loginId: string): void {
     const upper = String(loginId || '').toUpperCase();
@@ -1469,7 +1430,7 @@ class DerivWebSocketService {
       return false;
     }
 
-    let amount = Number(params.amount);
+    const amount = Number(params.amount);
     if (!Number.isFinite(amount) || amount <= 0) {
       this.notifyHandlers({
         msg_type: 'trade_error',
@@ -1480,50 +1441,10 @@ class DerivWebSocketService {
       return false;
     }
 
-    let barrier =
+    const barrier =
       params.barrier !== undefined && params.barrier !== ''
         ? String(params.barrier)
         : undefined;
-
-    let managedMatches = false;
-    let recoveryStep = 0;
-
-    // Restore the uploaded system's genuine Deriv DIGITMATCH execution path:
-    // live Markov target selection + 2.1x recovery state, max 5 steps.
-    // This applies to authenticated Deriv DEMO and REAL accounts alike.
-    if (params.contract_type === 'DIGITMATCH') {
-      managedMatches = true;
-      const state = this.getRecoveryState(params.symbol);
-      const currentTick = this.liveTickCounts.get(params.symbol) || 0;
-
-      if (state.halted) {
-        state.halted = false;
-        state.recoveryStep = 0;
-      }
-
-      if (state.recoveryStep === 0 || state.baseStake <= 0) {
-        state.baseStake = amount;
-      }
-
-      recoveryStep = state.recoveryStep;
-      amount = Number((state.baseStake * Math.pow(state.multiplier, recoveryStep)).toFixed(2));
-      amount = Math.max(0.35, amount);
-      barrier = String(this.markovDigit(params.symbol, params.barrier));
-
-      const balance = Number(this.accountInfo.balance ?? 0);
-      if (Number.isFinite(balance) && balance > 0 && amount > balance) {
-        state.halted = true;
-        this.notifyHandlers({
-          msg_type: 'trade_error',
-          clientTradeId: params.clientTradeId,
-          stage: 'risk',
-          error: `Recovery stake ${amount.toFixed(2)} exceeds the available Deriv balance. Matches engine stopped before sending the order.`,
-        });
-        return false;
-      }
-
-      state.lastTradeTick = currentTick;
-    }
 
     const meta: TradeRequestMeta = {
       clientTradeId: params.clientTradeId,
@@ -1531,8 +1452,8 @@ class DerivWebSocketService {
       symbol: params.symbol,
       amount,
       barrier,
-      managedMatches,
-      recoveryStep,
+      managedMatches: false,
+      recoveryStep: 0,
     };
 
     const reqId = this.nextPrivateReqId();
@@ -1550,7 +1471,7 @@ class DerivWebSocketService {
       req_id: reqId,
     };
 
-    if (barrier !== undefined && barrier !== '') proposalRequest.barrier = barrier;
+    if (barrier !== undefined) proposalRequest.barrier = barrier;
 
     const sent = this.sendAccount(proposalRequest);
     if (!sent) {
@@ -1565,6 +1486,7 @@ class DerivWebSocketService {
     }
     return sent;
   }
+
 
   public buyContract(params: Omit<PlaceContractParams, 'clientTradeId'> & { clientTradeId?: string }): boolean {
     const clientTradeId = params.clientTradeId || `client-${Date.now()}`;
