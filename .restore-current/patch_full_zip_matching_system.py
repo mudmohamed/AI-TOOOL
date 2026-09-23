@@ -1,147 +1,258 @@
 from pathlib import Path
+import re
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path('.')
 
-def replace_once(path, old, new, label):
-    p = ROOT / path
-    s = p.read_text()
-    c = s.count(old)
-    if c != 1:
-        raise SystemExit(f'{label}: expected 1 match, found {c} in {path}')
-    p.write_text(s.replace(old, new, 1))
+def read(path):
+    return (ROOT / path).read_text()
 
-# 1) Complete the ZIP's own one-time MATCHES migration.
-p = ROOT / 'src/main.tsx'
-s = p.read_text()
-s = s.replace("const migrationKey = 'deriv_first_real_matches_engine_v1';", "const migrationKey = 'deriv_first_real_matches_engine_v2';")
-needle = "      targetStrategy: 'MARKOV_TRANSITION',\n"
-if needle not in s:
-    raise SystemExit('main migration targetStrategy not found')
-s = s.replace(needle, needle + "      contractMode: 'MATCHES',\n      onlyWhenSignalConfirmed: true,\n", 1)
-p.write_text(s)
+def write(path, text):
+    (ROOT / path).write_text(text)
 
-# 2) App: use both ZIP target engines and expose the ZIP backtester.
-p = ROOT / 'src/App.tsx'
-s = p.read_text()
-s = s.replace(
-    "import { findBestAutoMatchesTarget } from './utils/autoMatchesEngine';",
-    "import { findBestAutoMatchesTarget, findBestDiffersTarget } from './utils/autoMatchesEngine';",
-    1,
-)
-if "import { StrategyBacktesterTab } from './components/StrategyBacktesterTab';" not in s:
-    s = s.replace(
-        "import { AutoTradingSystemHero } from './components/AutoTradingSystemHero';",
-        "import { AutoTradingSystemHero } from './components/AutoTradingSystemHero';\nimport { StrategyBacktesterTab } from './components/StrategyBacktesterTab';",
-        1,
-    )
+def one(text, old, new, label):
+    count = text.count(old)
+    if count != 1:
+        raise SystemExit(f'{label}: expected 1 match, found {count}')
+    return text.replace(old, new, 1)
 
-s = s.replace(
-    "const [activeTab, setActiveTab] = useState<'SYSTEM' | 'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('SYSTEM');",
-    "const [activeTab, setActiveTab] = useState<'SYSTEM' | 'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN' | 'BACKTEST'>('SYSTEM');",
-    1,
-)
+# Complete the ZIP's MATCHES migration.
+p = 'src/main.tsx'
+s = read(p)
+s = one(s, "const migrationKey = 'deriv_first_real_matches_engine_v1';", "const migrationKey = 'deriv_first_real_matches_engine_v2';", 'migration key')
+s = one(s, "      targetStrategy: 'MARKOV_TRANSITION',\n", "      targetStrategy: 'MARKOV_TRANSITION',\n      contractMode: 'MATCHES',\n      onlyWhenSignalConfirmed: true,\n", 'migration matches config')
+write(p, s)
 
-# Default/fallback is the ZIP's real MATCHES setup; an explicit saved user choice still wins.
-s = s.replace("          contractMode: parsed.contractMode || 'DIFFERS',\n", "          contractMode: parsed.contractMode || 'MATCHES',\n          onlyWhenSignalConfirmed: parsed.onlyWhenSignalConfirmed ?? true,\n", 1)
-s = s.replace("      contractMode: 'DIFFERS',\n", "      contractMode: 'MATCHES',\n      onlyWhenSignalConfirmed: true,\n", 1)
+# Connect the ZIP's own WIN/MATCHES engines in App.
+p = 'src/App.tsx'
+s = read(p)
+s = one(s, "import { findBestAutoMatchesTarget } from './utils/autoMatchesEngine';", "import { findBestAutoMatchesTarget, findBestDiffersTarget } from './utils/autoMatchesEngine';", 'engine import')
+s = one(s, "import { AutoTradingSystemHero } from './components/AutoTradingSystemHero';", "import { AutoTradingSystemHero } from './components/AutoTradingSystemHero';\nimport { StrategyBacktesterTab } from './components/StrategyBacktesterTab';", 'backtester import')
+s = one(s, "const [activeTab, setActiveTab] = useState<'SYSTEM' | 'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN'>('SYSTEM');", "const [activeTab, setActiveTab] = useState<'SYSTEM' | 'OVERVIEW' | 'BULK' | 'MATCHES' | 'RECOVERY' | 'SCANNER' | 'DEEP_SCAN' | 'BACKTEST'>('SYSTEM');", 'tab type')
+s = one(s, "          contractMode: parsed.contractMode || 'DIFFERS',\n", "          contractMode: parsed.contractMode || 'MATCHES',\n          onlyWhenSignalConfirmed: parsed.onlyWhenSignalConfirmed ?? true,\n", 'saved default')
+s = one(s, "      contractMode: 'DIFFERS',\n", "      contractMode: 'MATCHES',\n      onlyWhenSignalConfirmed: true,\n", 'fresh default')
+s = one(s, "  const autoNextTradeRef = useRef(false);\n", "  const autoNextTradeRef = useRef(false);\n  const recoveryTradeRef = useRef<TradeInput | null>(null);\n", 'recovery ref')
 
-# Recovery must remember the actual losing market/contract/target from the real settled trade.
-anchor = "  const autoNextTradeRef = useRef(false);\n"
-if anchor not in s:
-    raise SystemExit('autoNextTradeRef anchor not found')
-s = s.replace(anchor, anchor + "  const recoveryTradeRef = useRef<TradeInput | null>(null);\n", 1)
+# Clear exact-loss recovery only when the user stops the bots.
+s = one(s, "    autoNextTradeRef.current = false;\n    autoDispatchLockRef.current = false;", "    autoNextTradeRef.current = false;\n    recoveryTradeRef.current = null;\n    autoDispatchLockRef.current = false;", 'stop clear')
 
-# Put exact-loss recovery before fresh scanners so next tick repeats the same market parameters.
+# Recovery has priority on the next real tick for the same symbol and repeats the exact lost contract/target.
 anchor = "        if (autoMatchesActiveRef.current && symbol === currentSymbolRef.current) {\n"
-recovery_block = """        if (autoNextTradeRef.current && recoveryTradeRef.current && symbol === recoveryTradeRef.current.symbol) {
-          const recoveryTrade = recoveryTradeRef.current;
-          const recoveryCfg = autoRecoveryConfigRef.current;
-         ÛÛœÝØœÙ\™Y^[Ý]H[X™\Š™XÛÝ™\žU˜YKœ^[Ý]
-NÂˆÛÛœÝ^[Ý]˜]HHØœÙ\™Y^[Ý]ˆˆÈØœÙ\™Y^[Ý]ˆˆ™XÛÝ™\žU˜YK˜ÛÛ˜XÝ\HOOH	ÓPUÒTÉÂˆÈKBˆˆ™XÛÝ™\žU˜YK˜ÛÛ˜XÝ\HOOH	ÑQ‘‘T”ÉÂˆÈKŒMBˆˆ™XÛÝ™\žPÙ™Ëœ^[Ý]˜]NÂˆÛÛœÝØ[Ý[]YÝZÙHHØ[Ý[]S™^ÝZÙJˆ™XÛÝ™\žPÙ™Ë˜˜\ÙTÝZÙKˆÙ\ÜÚ[Û”Ý]Ô™Y‹˜Ý\œ™[˜Ý[][]]™SÜÜËˆÙ\ÜÚ[Û”Ý]Ô™Y‹˜Ý\œ™[˜ÛÛœÙXÝ]]™SÜÜÙ\Ëˆ^[Ý]˜]Kˆ™XÛÝ™\žPÙ™Ëœ™XÛÝ™\žTÝ˜]YÞKˆ
-NÂ‚ˆ]]Ñ\Ü]ÚØÚÔ™Y‹˜Ý\œ™[HYNÂˆ\Ý\Ü]Ú[YT™Y‹˜Ý\œ™[H]K››ÝÊ
-NÂˆ[™TXÙU˜YT™Y‹˜Ý\œ™[
-Âˆ‹‹œ™XÛÝ™\žU˜YKˆÝZÙNˆØ[Ý[]YÝZÙKˆ[žTšXÙNˆ][ÝKˆ[žQYÚ]ˆXÚÑYÚ]ˆJNÂˆ™]\›ŽÂˆB‚ˆˆˆ‚šYˆ[˜ÚÜˆ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	Ø]]ÓX]Ú\È›ØÚÈ[˜ÚÜˆ›Ý›Ý[™	ÊBœÈHËœ™\XÙJ[˜ÚÜ‹™XÛÝ™\žWØ›ØÚÈ
-È[˜ÚÜ‹JB‚ˆÈÛÛ›™XÝÛÛ™š\›YYPUÒTÈØ]H[™H’T	ÜÈYXØ]YQ‘‘T”ÈÚ[ˆÚY[\™Ù][™Ú[™K‚›ÛHˆˆˆÛÛœÝ\ÓX]Ú\Ó[ÙHHÙ™Ë˜ÛÛ˜XÝ[ÙHOOH	ÓPUÒTÉÎÂˆÛÛœÝÛÛ˜XÝ\HH\ÓX]Ú\Ó[ÙHÈ	ÓPUÒTÉÈˆ	ÑQ‘T”ÉÎÂˆ]\™Ù]YÚ]HXÚÑYÚ]Â‚ˆYˆ
-Z\ÓX]Ú\Ó[ÙJHÂˆ\™Ù]YÚ]HÝ\œ™[[˜[\Ú\Ë˜ÛÛYÚ]ÏÈNÂˆH[ÙHÂˆˆˆ‚›™]ÈHˆˆˆÛÛœÝ\ÓX]Ú\Ó[ÙHHÙ™Ë˜ÛÛ˜XÝ[ÙHOOH	ÓPUÒTÉÎÂˆÛÛœÝÛÛ˜XÝ\HH\ÓX]Ú\Ó[ÙHÈ	ÓPUÒTÉÈˆ	ÑQ‘‘T”ÉÎÂˆ]\™Ù]YÚ]HXÚÑYÚ]Â‚ˆYˆ
-\ÓX]Ú\Ó[ÙH	‰ˆÙ™Ë›Û›UÚ[”ÚYÛ˜[ÛÛ™š\›YY	‰ˆ\ÚYÛ˜[š\ÕšYÙÙ\”™XYJHÂˆ™]\›ŽÂˆB‚ˆYˆ
-Z\ÓX]Ú\Ó[ÙJHÂˆ\™Ù]YÚ]Hš[™™\ÝY™™\œÕ\™Ù]
-\]YYÚ]ËXÚÑYÚ]
-K\™Ù]YÚ]ÂˆH[ÙHÂˆˆˆ‚šYˆÛ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	Ø]]È\™Ù]›ØÚÈ›Ý›Ý[™	ÊBœÈHËœ™\XÙJÛ™]ËJB‚ˆÈ™[[Ý™HHÛ™XÛÝ™\žH[\[Y[][Ûˆ]Ú[™ÙYX\šÙ]\˜[Y]\œË‚›ÛHˆˆˆYˆ
-XÝ]™P›Ý™Y‹˜Ý\œ™[OOH	ÔÕTT—Ô‘PÓÕ‘T–IÈ	‰ˆ]]Ó™^˜YT™Y‹˜Ý\œ™[
-HÂˆÛÛœÝÝ\œ™[[˜[\Ú\ÈHX\šÙ][˜[\Ù\Ô™Y‹˜Ý\œ™[ÜÞ[X›ÛNÂˆ]]Ñ\Ü]ÚØÚÔ™Y‹˜Ý\œ™[HYNÂˆ]]Ó™^˜YT™Y‹˜Ý\œ™[H˜[ÙNÂˆ\Ý\Ü]Ú[YT™Y‹˜Ý\œ™[H]K››ÝÊ
-NÂ‚ˆÛÛœÝØ[Ý[]YÝZÙHHØ[Ý[]S™^ÝZÙJˆKˆÙ\ÜÚ[Û”Ý]Ô™Y‹˜Ý\œ™[˜Ý[][]]™SÜÜËˆÙ\ÜÚ[Û”Ý]Ô™Y‹˜Ý\œ™[˜ÛÛœÙXÝ]]™SÜÜÙ\ËˆÝ\œ™[[˜[\Ú\ÏËœ™XÛÛ[Y[™YÛÛ˜XÝOOH	ÓPUÒTÉÈÈKHˆKŒMKˆ™XÛÝ™\žS[ÙBˆ
-NÂ‚ˆ[™TXÙU˜YT™Y‹˜Ý\œ™[
-ÂˆÞ[X›ÛˆÛÛ˜XÝ\NˆÝ\œ™[[˜[\Ú\ÏËœ™XÛÛ[Y[™YÛÛ˜XÝ	ÑQ‘‘T”ÉËˆ\™Ù]˜[YNˆÝ\œ™[[˜[\Ú\ÏËœ™XÛÛ[Y[™Y\™Ù]ÏÈKˆÝZÙNˆØ[Ý[]YÝZÙKˆJNÂˆ™]\›ŽÂˆBˆˆˆ‚›™]ÈHˆˆˆYˆ
-XÝ]™P›Ý™Y‹˜Ý\œ™[OOH	ÔÕTT—Ô‘PÓÕ‘T–IÈ	‰ˆ]]Ó™^˜YT™Y‹˜Ý\œ™[	‰ˆ\™XÛÝ™\žU˜YT™Y‹˜Ý\œ™[
-HÂˆ™]\›ŽÂˆBˆˆˆ‚šYˆÛ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	ÛÛÝ\\ˆ™XÛÝ™\žH›ØÚÈ›Ý›Ý[™	ÊBœÈHËœ™\XÙJÛ™]ËJB‚ˆÈÙ][Y[ˆÙY\]]Ë[™^\›YYÈ™[Y[X™\ˆ^XÝÜÜËÛX\ˆÛ›HY\ˆH™X[Ú[‹‚›ÛHˆˆˆYˆ
-]]Ó™^˜YT™Y‹˜Ý\œ™[
-HÂˆ]]Ó™^˜YT™Y‹˜Ý\œ™[H˜[ÙNÂˆBˆ™]\›ŽÂˆˆˆ‚›™]ÈHˆˆˆYˆ
-ÛÛŠHÂˆ™XÛÝ™\žU˜YT™Y‹˜Ý\œ™[H[ÂˆH[ÙHYˆ
-]]Ó™^˜YT™Y‹˜Ý\œ™[
-HÂˆ™XÛÝ™\žU˜YT™Y‹˜Ý\œ™[HÂˆÞ[X›ÛˆÙ]Y˜YKœÞ[X›ÛˆÛÛ˜XÝ\NˆÙ]Y˜YK˜ÛÛ˜XÝ\Kˆ\™Ù]˜[YNˆÙ]Y˜YK\™Ù]˜[YKˆÝZÙNˆÙ]Y˜YKœÝZÙKˆ^[Ý]ˆÙ]Y˜YKœ^[Ý]ˆ[žTšXÙNˆÙ]Y˜YK™^]šXÙKˆ[žQYÚ]ˆÙ]Y˜YK™^]YÚ]ˆNÂˆÙ]]]Ô™XÛÝ™\žS›ÝXÙJÜÜÈÛˆ	ÜÙ]Y˜YKœÞ[X›ÛKˆØ[YH	ÜÙ]Y˜YK˜ÛÛ˜XÝ\_H\™Ù]	ÜÙ]Y˜YK\™Ù]˜[Y_H\›YY›ÜˆH™^™X[\š]ˆXÚË˜
-NÂˆBˆ™]\›ŽÂˆˆˆ‚šYˆÛ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	ÜÙ][Y[]]Ó™^›ØÚÈ›Ý›Ý[™	ÊBœÈHËœ™\XÙJÛ™]ËJB‚ˆÈÝÜÜ™\Ù]]\Ý[ÛÈÛX\ˆ[™[™È^XÝ[ÜÜÈ™XÛÝ™\žK‚œÈHËœ™\XÙJˆˆ]]Ó™^˜YT™Y‹˜Ý\œ™[H˜[ÙN×ˆ]]Ñ\Ü]ÚØÚÔ™Y‹˜Ý\œ™[H˜[ÙNÈ‹ˆˆ]]Ó™^˜YT™Y‹˜Ý\œ™[H˜[ÙN×ˆ™XÛÝ™\žU˜YT™Y‹˜Ý\œ™[H[×ˆ]]Ñ\Ü]ÚØÚÔ™Y‹˜Ý\œ™[H˜[ÙNÈ‹ˆKŠBœÈHËœ™\XÙJˆˆÙ]\ÝÙ]Y˜YJ[
-N×ˆ‹ˆˆÙ]\ÝÙ]Y˜YJ[
-N×ˆ™XÛÝ™\žU˜YT™Y‹˜Ý\œ™[H[×ˆ‹ˆKŠB‚ˆÈY˜XÚÝ\Ý\ˆXˆ[™XYH™\Ù[[ˆ’T]™]š[Ý\ÛH[œ™XXÚX›K‚X—Ø[˜ÚÜˆHˆÉÔ‘PÓÕ‘T–IË	Ô™XÛÝ™\žHÝ˜]YÞIËÚY[ÚXÚ×Kˆ‚šYˆX—Ø[˜ÚÜˆ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	ÝXˆ[˜ÚÜˆ›Ý›Ý[™	ÊBœÈHËœ™\XÙJX—Ø[˜ÚÜ‹X—Ø[˜ÚÜˆ
-ÈˆÉÐPÒÕTÕ	Ë	ÕÚ[›š[™ÈÙ]\˜XÚÝ\Ý\‰ËXÝ]š]WKˆ‹JB‚ˆÈÚ\™HX[X[YÚ]]ÛœÈ[È]™HÛÛ™šYË‚›ÛHˆˆˆØ[\TÚ^™O^ÜØ[\TÚ^™_BˆÛ”Ø[\TÚ^™PÚ[™ÙO^ÜÙ]Ø[\TÚ^™_BˆÏ‚ˆˆˆ‚›™]ÈHˆˆˆØ[\TÚ^™O^ÜØ[\TÚ^™_BˆÛ”Ø[\TÚ^™PÚ[™ÙO^ÜÙ]Ø[\TÚ^™_BˆÛ”Ù[XÝ\™Ù]YÚ]^ÊYÚ]\JHOˆÂˆÛÛœÝ™^ÛÛ™šYÎˆ]]ÓX]Ú\ÐÛÛ™šYÈHÂˆ‹‹˜]]ÓX]Ú\ÐÛÛ™šYÔ™Y‹˜Ý\œ™[ˆÛÛ˜XÝ[ÙNˆ\Kˆ\™Ù]Ý˜]YÞNˆ	ÐÕTÕÓIËˆÝ\ÝÛU\™Ù]YÚ]ˆYÚ]ˆNÂˆÙ]]]ÓX]Ú\ÐÛÛ™šYÊ™^ÛÛ™šYÊNÂˆ]]ÓX]Ú\ÐÛÛ™šYÔ™Y‹˜Ý\œ™[H™^ÛÛ™šYÎÂˆžHÈØØ[ÝÜ˜YÙKœÙ]][J	Ù\š]—Ø]]×ÛX]Ú\×ØÛÛ™šYÉË”ÓÓ‹œÝš[™ÚYžJ™^ÛÛ™šYÊJNÈHØ]ÚßBˆÚÝÓ›ÝXÙJ	Ý\_H\™Ù]YÚ]	ÙYÚ]HØYY[ÈH™X[]]È˜Y\‹˜
-NÂˆ_BˆÏ‚ˆˆˆ‚šYˆÛ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	ÓX]Ú\ÑYÚ][˜[^™\ˆ›ÜÈ[˜ÚÜˆ›Ý›Ý[™	ÊBœÈHËœ™\XÙJÛ™]ËJB‚ˆÈ™[™\ˆ[™ÛÛ›™XÝH’T	ÜÈÝ˜]YÞH˜XÚÝ\Ý\ˆ\K]ËS]™H]‚˜[˜ÚÜˆHˆˆˆÊXÝ]™UXˆOOH	ÔÖTÕSIÈXÝ]™UXˆOOH	ÓÕ‘T•’QUÉÈXÝ]™UXˆOOH	Ô‘PÓÕ‘T–IÊH	‰ˆ
-ˆÝ\\”™XÛÝ™\žSX[˜YÙ\‚ˆˆˆ‚˜˜XÚÝ\ÝÜ™[™\ˆHˆˆˆØXÝ]™UXˆOOH	ÐPÒÕTÕ	È	‰ˆ
-ˆÝ˜]YÞP˜XÚÝ\Ý\•X‚ˆÝ\œ™[Þ[X›Û^ØÝ\œ™[Þ[X›ÛBˆX\šÙ]XÚÜÏ^ÛX\šÙ]XÚÑ]T™Y‹˜Ý\œ™[BˆÛ\TÝ˜]YÞUÓ]™P›Ý^Ê\X[
-HOˆÂˆÛÛœÝ™^ÛÛ™šYÎˆ]]ÓX]Ú\ÐÛÛ™šYÈHÈ‹‹˜]]ÓX]Ú\ÐÛÛ™šYÔ™Y‹˜Ý\œ™[‹‹œ\X[NÂˆÙ]]]ÓX]Ú\ÐÛÛ™šYÊ™^ÛÛ™šYÊNÂˆ]]ÓX]Ú\ÐÛÛ™šYÔ™Y‹˜Ý\œ™[H™^ÛÛ™šYÎÂˆžHÈØØ[ÝÜ˜YÙKœÙ]][J	Ù\š]—Ø]]×ÛX]Ú\×ØÛÛ™šYÉË”ÓÓ‹œÝš[™ÚYžJ™^ÛÛ™šYÊJNÈHØ]ÚßBˆÚÝÓ›ÝXÙJ	Ð˜XÚÝ\ÝYÙ]\ØYY[ÈH™X[]]È˜Y\‹‰ÊNÂˆ_BˆÛ“˜]šYØ]UÕ˜Y\^Ê
-HOˆÙ]XÝ]™UXŠ	ÑQTÔÐÐS‰Ê_BˆÏ‚ˆ
-_B‚ˆˆˆ‚šYˆ[˜ÚÜˆ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	Ü™XÛÝ™\žH™[™\ˆ[˜ÚÜˆ›Ý›Ý[™	ÊBœÈHËœ™\XÙJ[˜ÚÜ‹˜XÚÝ\ÝÜ™[™\ˆ
-È[˜ÚÜ‹JB‚ˆÈ\Ü^HHØ[YH\™Ù]H]™H]]È›ÝÛÝ[XÝX[H\ÙK›Ý[Ø^\ÈÝYÚ]‚˜[˜ÚÜˆHˆÛÛœÝÝ\œ™[˜[[˜ÙHH]™P˜[[˜ÙN×—ˆ™]\›ˆ
-ˆ‚˜Ø[ÈHˆˆˆÛÛœÝÝ\œ™[]]ÔÚYÛ˜[HÝ\œ™[[˜[\Ú\ÂˆÈš[™™\Ý]]ÓX]Ú\Õ\™Ù]
-ˆÝ\œ™[Þ[X›ÛˆÝ\œ™[[˜[\Ú\Ë™\Ü^S˜[YKˆYÚ]ËˆÝ\œ™[[˜[\Ú\Ë™YÚ]Ý]Ëˆ\ÝYÚ]ˆ
-Bˆˆ[ÂˆÛÛœÝÝ\œ™[Y™™\œÕ\™Ù]Hš[™™\ÝY™™\œÕ\™Ù]
-YÚ]Ë\ÝYÚ]
-K\™Ù]YÚ]ÂˆÛÛœÝ\Ü^YY]]Õ\™Ù]H]]ÓX]Ú\ÐÛÛ™šYË˜ÛÛ˜XÝ[ÙHOOH	ÓPUÒTÉÂˆÈ]]ÓX]Ú\ÐÛÛ™šYË˜Ý\ÝÛU\™Ù]YÚ]OOH[™Yš[™YˆÈ]]ÓX]Ú\ÐÛÛ™šYË˜Ý\ÝÛU\™Ù]YÚ]ˆˆ]]ÓX]Ú\ÐÛÛ™šYË\™Ù]Ý˜]YÞHOOH	ÓPT’ÓÕ—ÕS”ÒUSÓ‰ÂˆÈÝ\œ™[]]ÔÚYÛ˜[Ë\™Ù]YÚ]ÏÈÝ\œ™[[˜[\Ú\ÏËšÝYÚ]ˆˆ]]ÓX]Ú\ÐÛÛ™šYË\™Ù]Ý˜]YÞHOOH	Ô‘TPUÑS•–IÂˆÈ\ÝYÚ]ˆˆÝ\œ™[[˜[\Ú\ÏËšÝYÚ]ˆˆÝ\œ™[Y™™\œÕ\™Ù]Â‚ˆˆˆ‚šYˆ[˜ÚÜˆ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	ØÝ\œ™[˜[[˜ÙH™]\›ˆ[˜ÚÜˆ›Ý›Ý[™	ÊBœÈHËœ™\XÙJ[˜ÚÜ‹ˆÛÛœÝÝ\œ™[˜[[˜ÙHH]™P˜[[˜ÙN×—ˆˆ
-ÈØ[È
-Èˆ™]\›ˆ
-ˆ‹JBœÈHËœ™\XÙJˆ\™Ù]YÚ]^ØÝ\œ™[[˜[\Ú\ÏËšÝYÚ]Wˆ‹ˆ\™Ù]YÚ]^Ù\Ü^YY]]Õ\™Ù]Wˆ‹JB‚œÜš]WÝ^
-ÊB‚ˆÈÊH[ÈPUÒTËÑQ‘‘T”ÈØ]™\È]\Ý\ÙHHØ[YH’T\™Ù][™Ú[™\È\ÈHXZ[ˆ›Ý‚œH“ÓÕÈ	ÜÜ˜ËØÛÛ\Û™[ËÐ[Ó][U˜Y\‹Þ	ÂœÈHœ™XYÝ^
+recovery = """        if (autoNextTradeRef.current && recoveryTradeRef.current && symbol === recoveryTradeRef.current.symbol) {
+          const rt = recoveryTradeRef.current;
+          const rc = autoRecoveryConfigRef.current;
+          const observedPayout = Number(rt.payout || 0);
+          const payoutRate = observedPayout > 0
+            ? observedPayout
+            : rt.contractType === 'MATCHES' ? 9.5 : rt.contractType === 'DIFFERS' ? 1.095 : rc.payoutRate;
+          const recoveryStake = calculateNextStake(
+            rc.baseStake,
+            sessionStatsRef.current.cumulativeLoss,
+            sessionStatsRef.current.consecutiveLosses,
+            payoutRate,
+            rc.recoveryStrategy,
+          );
+          autoDispatchLockRef.current = true;
+          lastDispatchTimeRef.current = Date.now();
+          handlePlaceTradeRef.current({ ...rt, stake: recoveryStake, entryPrice: quote, entryDigit: tickDigit });
+          return;
+        }
 
-Bš[\ÜØ[˜ÚÜˆHš[\Ü™XXÝÈ\ÙTÝ]K\ÙQY™™XÝ\ÙT™Y‹\ÙSY[[ÈHœ›ÛH	Ü™XXÝ	Î×ˆ‚šYˆ[\ÜØ[˜ÚÜˆ[ˆÈ[™‹‹‹Ý][ËØ]]ÓX]Ú\Ñ[™Ú[™Hˆ›Ý[ˆÎ‚ˆÈHËœ™\XÙJ[\ÜØ[˜ÚÜ‹[\ÜØ[˜ÚÜˆ
-Èš[\ÜÈš[™™\Ý]]ÓX]Ú\Õ\™Ù]š[™™\ÝY™™\œÕ\™Ù]Hœ›ÛH	Ë‹‹Ý][ËØ]]ÓX]Ú\Ñ[™Ú[™IÎ×ˆ‹JB‚›ÛHˆˆˆYˆ
-ÛÛ™šYËœÝ˜]YÞHOOH	ÕSWÑQ‘‘T”×ÕÐU‘IÊHÂˆËÈš[™ÛÛ\ÝYÚ]Ú]\™Ù\Ý[^BˆÛÛœÝÛÛ\ÝH][K™YÚ]Ý]Ëœ™YXÙJ
-Z[‹Ý\ŠHOˆ
-Ý\‹œ\˜Ù[YÙHZ[‹œ\˜Ù[YÙHÈÝ\ˆˆZ[ŠK][K™YÚ]Ý]ÖÌJNÂˆ™XÛÛ[Y[™YÛÛ˜XÝH	ÑQ‘‘T”ÉÎÂˆ™XÛÛ[Y[™Y\™Ù]HÛÛ\ÝÈÛÛ\Ý™YÚ]ˆ][K˜ÛÛYÚ]ÂˆØÛÜ™HHÛÛ\ÝÈX]›Z[ŠM‹X]›X^
-ÌX]œ›Ý[™
+"""
+s = one(s, anchor, recovery + anchor, 'recovery priority')
 
-LHÛÛ\Ýœ\˜Ù[YÙJH
-ˆŽN
-È
-ÛÛ\Ý™[^HˆMHÈˆ
-JJJHˆNÂˆ˜][Û˜[HHÛÛ\ÝYÚ]ÉÜ™XÛÛ[Y[™Y\™Ù]H
-Û›H	ØÛÛ\ÝËœ\˜Ù[YÙKÑš^Y
-J_IHœ™\K[^H	ØÛÛ\ÝË™[^HHXÚÜÊXÂˆˆˆ‚›™]ÈHˆˆˆYˆ
-ÛÛ™šYËœÝ˜]YÞHOOH	ÕSWÑQ‘‘T”×ÕÐU‘IÊHÂˆÛÛœÝYÚ]ÈHX\šÙ]XÚÜÖÚ][KœÞ[X›ÛOË™YÚ]È×NÂˆÛÛœÝY™™\œÈHš[™™\ÝY™™\œÕ\™Ù]
-YÚ]Ë][K›\ÝYÚ]
-NÂˆ™XÛÛ[Y[™YÛÛ˜XÝH	ÑQ‘‘T”ÉÎÂˆ™XÛÛ[Y[™Y\™Ù]HY™™\œË\™Ù]YÚ]ÂˆØÛÜ™HHX]œ›Ý[™
-Y™™\œËÚ[”›Ø˜Xš[]JNÂˆ˜][Û˜[HHÚ[ˆÚY[\™Ù]ÉÜ™XÛÛ[Y[™Y\™Ù]H
-	ÙY™™\œË™YÚ]œ™\]Y[˜ÞKÑš^Y
-J_IHØœÙ\™Yœ™\]Y[˜ÞK[^H	ÙY™™\œË™[^_HXÚÜÊXÂˆˆˆ‚šYˆÛ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	Ø[ÈY™™\œÈ›ØÚÈ›Ý›Ý[™	ÊBœÈHËœ™\XÙJÛ™]ËJB‚›ÛHˆˆˆH[ÙHYˆ
-ÛÛ™šYËœÝ˜]YÞHOOH	ÓPUÒT×ÔÓ’TT—ÕÐU‘IÊHÂˆÛÛœÝÝ\ÝH][K™YÚ]Ý]Ëœ™YXÙJ
-X^Ý\ŠHOˆ
-Ý\‹œ\˜Ù[YÙHˆX^œ\˜Ù[YÙHÈÝ\ˆˆX^
-K][K™YÚ]Ý]ÖÌJNÂˆ™XÛÛ[Y[™YÛÛ˜XÝH	ÓPUÒTÉÎÂˆ™XÛÛ[Y[™Y\™Ù]HÝ\ÝÈÝ\Ý™YÚ]ˆ][KšÝYÚ]ÂˆØÛÜ™HHÝ\ÝÈX]œ›Ý[™
-Ý\Ýœ\˜Ù[YÙH
-ˆH
-ÈŒ
-HˆŒÂˆ˜][Û˜[HHÝÛ\Ý\ˆYÚ]ÉÜ™XÛÛ[Y[™Y\™Ù]H
-ŽK^^[Ý]Ûš\\ŠXÂˆBˆˆˆ‚›™]ÈHˆˆˆH[ÙHYˆ
-ÛÛ™šYËœÝ˜]YÞHOOH	ÓPUÒT×ÔÓ’TT—ÕÐU‘IÊHÂˆÛÛœÝYÚ]ÈHX\šÙ]XÚÜÖÚ][KœÞ[X›ÛOË™YÚ]È×NÂˆÛÛœÝÚYÛ˜[Hš[™™\Ý]]ÓX]Ú\Õ\™Ù]
-ˆ][KœÞ[X›Ûˆ][K™\Ü^S˜[YKˆYÚ]Ëˆ][K™YÚ]Ý]Ëˆ][K›\ÝYÚ]ˆ
-NÂˆ™XÛÛ[Y[™YÛÛ˜XÝH	ÓPUÒTÉÎÂˆ™XÛÛ[Y[™Y\™Ù]HÚYÛ˜[\™Ù]YÚ]ÂˆØÛÜ™HHX]œ›Ý[™
-ÚYÛ˜[œ›Ø˜Xš[]TØÛÜ™JNÂˆ˜][Û˜[HHÚYÛ˜[œ˜][Û˜[NÂˆBˆˆˆ‚šYˆÛ›Ý[ˆÎ‚ˆ˜Z\ÙHÞ\Ý[Q^]
-	Ø[ÈX]Ú\È›ØÚÈ›Ý›Ý[™	ÊBœÈHËœ™\XÙJÛ™]ËJBœÜš]WÝ^
-ÊB‚œš[
-	Ù[’TX]Ú[™ËÝÚ[ˆÚ\š[™È]Ú\YY	ÊB
+# MATCHES must wait for the ZIP confirmation trigger. DIFFERS must use the ZIP Win Shield target engine.
+old = """          const isMatchesMode = cfg.contractMode === 'MATCHES';
+          const contractType = isMatchesMode ? 'MATCHES' : 'DIFFERS';
+          let targetDigit = tickDigit;
+
+          if (!isMatchesMode) {
+            targetDigit = currentAnalysis.coldDigit ?? 5;
+          } else {
+"""
+new = """          const isMatchesMode = cfg.contractMode === 'MATCHES';
+          const contractType = isMatchesMode ? 'MATCHES' : 'DIFFERS';
+          let targetDigit = tickDigit;
+
+          if (isMatchesMode && cfg.onlyWhenSignalConfirmed && !signal.isTriggerReady) return;
+
+          if (!isMatchesMode) {
+            targetDigit = findBestDiffersTarget(updatedDigits, tickDigit).targetDigit;
+          } else {
+"""
+s = one(s, old, new, 'live signal wiring')
+
+# The old SUPER_RECOVERY block changed contract/target. Keep it idle unless an exact loss has been captured.
+old_recovery = """        if (activeBotRef.current === 'SUPER_RECOVERY' && autoNextTradeRef.current) {
+          const currentAnalysis = marketAnalysesRef.current[symbol];
+          autoDispatchLockRef.current = true;
+          autoNextTradeRef.current = false;
+          lastDispatchTimeRef.current = Date.now();
+
+          const calculatedStake = calculateNextStake(
+            1,
+            sessionStatsRef.current.cumulativeLoss,
+            sessionStatsRef.current.consecutiveLosses,
+            currentAnalysis?.recommendedContract === 'MATCHES' ? 9.5 : 1.095,
+            recoveryMode
+          );
+
+          handlePlaceTradeRef.current({
+            symbol,
+            contractType: currentAnalysis?.recommendedContract || 'DIFFERS',
+            targetValue: currentAnalysis?.recommendedTarget ?? 5,
+            stake: calculatedStake,
+          });
+          return;
+        }
+"""
+new_recovery = """        if (activeBotRef.current === 'SUPER_RECOVERY' && autoNextTradeRef.current && !recoveryTradeRef.current) {
+          return;
+        }
+"""
+s = one(s, old_recovery, new_recovery, 'old recovery block')
+
+# On official Deriv settlement, remember the exact lost parameters and keep recovery armed until a real win.
+old_settle = """        if (autoNextTradeRef.current) {
+          autoNextTradeRef.current = false;
+        }
+        return;
+"""
+new_settle = """        if (won) {
+          recoveryTradeRef.current = null;
+        } else if (autoNextTradeRef.current) {
+          recoveryTradeRef.current = {
+            symbol: settledTrade.symbol,
+            contractType: settledTrade.contractType,
+            targetValue: settledTrade.targetValue,
+            stake: settledTrade.stake,
+            payout: settledTrade.payout,
+            entryPrice: settledTrade.exitPrice,
+            entryDigit: settledTrade.exitDigit,
+          };
+          setAutoRecoveryNotice(`Loss on ${settledTrade.symbol}. Same ${settledTrade.contractType} target ${settledTrade.targetValue} armed for the next real Deriv tick.`);
+        }
+        return;
+"""
+s = one(s, old_settle, new_settle, 'settlement recovery')
+
+# Add the ZIP backtester to navigation.
+s = one(s, "              ['RECOVERY', 'Recovery Strategy', ShieldCheck],\n", "              ['RECOVERY', 'Recovery Strategy', ShieldCheck],\n              ['BACKTEST', 'Winning Setup Backtester', Activity],\n", 'backtest nav')
+
+# Wire manual MATCHES/DIFFERS digit choice into the actual live configuration.
+old_analyzer = """            sampleSize={sampleSize}
+            onSampleSizeChange={setSampleSize}
+          />
+"""
+new_analyzer = """            sampleSize={sampleSize}
+            onSampleSizeChange={setSampleSize}
+            onSelectTargetDigit={(digit, type) => {
+              const nextConfig: AutoMatchesConfig = {
+                ...autoMatchesConfigRef.current,
+                contractMode: type,
+                targetStrategy: 'CUSTOM',
+                customTargetDigit: digit,
+              };
+              setAutoMatchesConfig(nextConfig);
+              autoMatchesConfigRef.current = nextConfig;
+              try { localStorage.setItem('deriv_auto_matches_config', JSON.stringify(nextConfig)); } catch {}
+              showNotice(`${type} target digit ${digit} loaded into the real Auto Trader.`);
+            }}
+          />
+"""
+s = one(s, old_analyzer, new_analyzer, 'manual target wiring')
+
+# Render the ZIP backtester and let its Apply-to-Live button update the real Auto bot.
+recovery_render = """        {(activeTab === 'SYSTEM' || activeTab === 'OVERVIEW' || activeTab === 'RECOVERY') && (
+          <SuperRecoveryManager
+"""
+backtest_render = """        {activeTab === 'BACKTEST' && (
+          <StrategyBacktesterTab
+            currentSymbol={currentSymbol}
+            marketTicks={marketTickDataRef.current}
+            onApplyStrategyToLiveBot={(partial) => {
+              const nextConfig: AutoMatchesConfig = { ...autoMatchesConfigRef.current, ...partial };
+              setAutoMatchesConfig(nextConfig);
+              autoMatchesConfigRef.current = nextConfig;
+              try { localStorage.setItem('deriv_auto_matches_config', JSON.stringify(nextConfig)); } catch {}
+              showNotice('Backtested setup loaded into the real Auto Trader.');
+            }}
+            onNavigateToTrader={() => setActiveTab('DEEP_SCAN')}
+          />
+        )}
+
+""" + recovery_render
+s = one(s, recovery_render, backtest_render, 'backtester render')
+
+# Floating bar must show the target the live bot would actually use.
+return_anchor = "  const currentBalance = liveBalance;\n\n  return (\n"
+calc = """  const currentBalance = liveBalance;
+  const currentAutoSignal = currentAnalysis
+    ? findBestAutoMatchesTarget(currentSymbol, currentAnalysis.displayName, digits, currentAnalysis.digitStats, lastDigit)
+    : null;
+  const currentDiffersTarget = findBestDiffersTarget(digits, lastDigit).targetDigit;
+  const displayedAutoTarget = autoMatchesConfig.contractMode === 'MATCHES'
+    ? autoMatchesConfig.customTargetDigit !== undefined
+      ? autoMatchesConfig.customTargetDigit
+      : autoMatchesConfig.targetStrategy === 'MARKOV_TRANSITION'
+        ? currentAutoSignal?.targetDigit ?? currentAnalysis?.hotDigit
+        : autoMatchesConfig.targetStrategy === 'REPEAT_ENTRY'
+          ? lastDigit
+          : currentAnalysis?.hotDigit
+    : currentDiffersTarget;
+
+  return (
+"""
+s = one(s, return_anchor, calc, 'display target calc')
+
+count = s.count("        targetDigit={currentAnalysis?.hotDigit}\n")
+if count != 2:
+    raise SystemExit(f'target display: expected 2 matches, found {count}')
+s = s.replace("        targetDigit={currentAnalysis?.hotDigit}\n", "        targetDigit={displayedAutoTarget}\n")
+write(p, s)
+
+# Bulk WIN/MATCHES waves must use the same ZIP target engines as the main bot.
+p = 'src/components/BulkMultiTrader.tsx'
+s = read(p)
+s = one(s, "import React, { useState, useEffect, useRef, useMemo } from 'react';\n", "import React, { useState, useEffect, useRef, useMemo } from 'react';\nimport { findBestAutoMatchesTarget, findBestDiffersTarget } from '../utils/autoMatchesEngine';\n", 'bulk engine import')
+old = """        if (config.strategy === 'ULTRA_DIFFERS_WAVE') {
+          // Find coldest digit with largest delay
+          const coldest = item.digitStats.reduce((min, cur) => (cur.percentage < min.percentage ? cur : min), item.digitStats[0]);
+          recommendedContract = 'DIFFERS';
+          recommendedTarget = coldest ? coldest.digit : item.coldDigit;
+          score = coldest ? Math.min(96, Math.max(70, Math.round((100 - coldest.percentage) * 0.98 + (coldest.delay > 15 ? 8 : 0)))) : 85;
+          rationale = `Coldest digit #${recommendedTarget} (only ${coldest?.percentage.toFixed(1)}% freq, delay ${coldest?.delay || 0} ticks)`;
+"""
+new = """        if (config.strategy === 'ULTRA_DIFFERS_WAVE') {
+          const differs = findBestDiffersTarget(marketTicks[item.symbol]?.digits || [], item.lastDigit);
+          recommendedContract = 'DIFFERS';
+          recommendedTarget = differs.targetDigit;
+          score = Math.round(differs.winProbability);
+          rationale = `Win Shield target #${recommendedTarget} (${differs.digitFrequency.toFixed(1)}% observed frequency, delay ${differs.delay} ticks)`;
+"""
+s = one(s, old, new, 'bulk differs')
+old = """        } else if (config.strategy === 'MATCHES_SNIPER_WAVE') {
+          const hottest = item.digitStats.reduce((max, cur) => (cur.percentage > max.percentage ? cur : max), item.digitStats[0]);
+          recommendedContract = 'MATCHES';
+          recommendedTarget = hottest ? hottest.digit : item.hotDigit;
+          score = hottest ? Math.round(hottest.percentage * 4.5 + 20) : 60;
+          rationale = `Hot cluster digit #${recommendedTarget} (~9.5x payout sniper)`;
+        }
+"""
+new = """        } else if (config.strategy === 'MATCHES_SNIPER_WAVE') {
+          const signal = findBestAutoMatchesTarget(
+            item.symbol,
+            item.displayName,
+            marketTicks[item.symbol]?.digits || [],
+            item.digitStats,
+            item.lastDigit,
+          );
+          recommendedContract = 'MATCHES';
+          recommendedTarget = signal.targetDigit;
+          score = Math.round(signal.probabilityScore);
+          rationale = signal.rationale;
+        }
+"""
+s = one(s, old, new, 'bulk matches')
+write(p, s)
+
+print('full ZIP WIN/MATCHES wiring applied')
